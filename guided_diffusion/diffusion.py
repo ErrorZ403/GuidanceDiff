@@ -322,6 +322,8 @@ class Diffusion(object):
         lr = 0.001
         m_prev = 0.0
         v_prev = 0.0
+
+        self.losses = self._get_losses(args.loss)
         
         for x_orig, classes in pbar:
             x_orig = x_orig.to(self.device)
@@ -353,7 +355,8 @@ class Diffusion(object):
                 config.data.image_size,
                 device=self.device,
             )
-            x = x[torch.randint(0, 10)]
+            choice = np.random.randint(0, 10)
+            x = x[choice:choice + 1]
 
             skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
             n = x.size(0)
@@ -389,7 +392,7 @@ class Diffusion(object):
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
 
-                    gradient = at.sqrt() * self.take_grad(self.gradient_degradations, xt, x0_t, y)
+                    gradient = at.sqrt() * self.take_grad(self.gradient_degradations, xt, x0_t, y, self.losses)
                     if self.correction == 'momentum':
                         self.corr_func = self.momentum_corrector(lr, gradient, m_prev)
                     elif self.correction == 'adam':
