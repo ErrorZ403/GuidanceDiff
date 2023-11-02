@@ -84,6 +84,34 @@ def parse_args_and_config():
         "--add_noise",
         action="store_true"
     )
+    parser.add_argument(
+        "--start_operators",
+        nargs='+',
+        type=str,
+        default=['bicubic']
+    )
+    parser.add_argument(
+        "--gradient_operators",
+        nargs='+',
+        type=str,
+        default=['bicubic']
+    )
+    parser.add_argument(
+        "correction_type",
+        type=str,
+        default=None
+    )
+    parser.add_argument(
+        "rates",
+        nargs="+",
+        type=float,
+        default=[5]
+    )
+    parser.add_argument(
+        "loss",
+        type=str,
+        default='L1'
+    )
 
     
 

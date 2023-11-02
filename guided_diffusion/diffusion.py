@@ -205,15 +205,20 @@ class Diffusion(object):
                   f'travel_repeat = {self.config.time_travel.travel_repeat}.',
                   f'Task: {self.args.deg}.'
                  )
-            self.svd_based_ddnm_plus(model, cls_fn)
+            self.freedom(model, cls_fn)
             
-    def grad_and_value(self, operator, x, x_hat, measurement):
-        difference = operator(x_hat) - measurement
-        norm = torch.linalg.norm(difference)
+    def take_grad(self, operators, x, x_hat, measurement, losses):
+        loss_value = 0.0
 
-        norm_grad = torch.autograd.grad(outputs=norm, inputs=x)[0]
+        for operator in operators:
+            x_hat = operator(x_hat)
 
-        return norm_grad
+        for loss in losses:
+            loss_value += loss(x_hat, measurement)
+            loss_value.backward()
+            gradient = x.grad
+
+        return gradient
     
     def momentum_corrector(self, lr, gradient, m_prev):
         m = self.rate_m * m_prev + gradient
@@ -233,12 +238,47 @@ class Diffusion(object):
 
         return gradient
 
+    def _get_degradations_list(self, operators_list):
+        operators = []
+        for operator in operators_list:
+            if operator == 'bicubic':
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='bicubic').clamp_(0.0, 1.0)
+            elif operator == 'nearest':
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest').clamp_(0.0, 1.0)
+            elif operator == 'linear':
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='linear').clamp_(0.0, 1.0)
+            elif operator == 'bilinear':
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='bilinear').clamp_(0.0, 1.0)
+            elif operator == 'trilinear':
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='trilinear').clamp_(0.0, 1.0)
+            elif operator == 'area':
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='area').clamp_(0.0, 1.0)
+            elif operator == 'nearest-exact':
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest-exact').clamp_(0.0, 1.0)
+            else:
+                raise ValueError(f'Operator {operator} have not been implemented yet')
+            operators.append(A)
+
+        return operators
+
+    def _get_losses(self, loss):
+        losses = []
+        if loss == 'L1':
+            losses.append(torch.nn.L1Loss())
+        elif loss == 'L2':
+            losses.append(torch.nn.MSELoss())
+        elif loss == 'L1+L2':
+            losses.append(torch.nn.L1Loss())
+            losses.append(torch.nn.MSELoss())
+        else:
+            raise ValueError(f'Loss {loss} have not been implemented yet')
+        
+        return losses
+
     def freedom(self, model, cls_fn):
         args, config = self.args, self.config
 
         dataset, test_dataset = get_dataset(args, config)
-
-        device_count = torch.cuda.device_count()
 
         if args.subset_start >= 0 and args.subset_end > 0:
             assert args.subset_end > args.subset_start
@@ -265,21 +305,31 @@ class Diffusion(object):
             generator=g,
         )
         
-        args.sigma_y = 2 * args.sigma_y #to account for scaling to [-1,1]
-        sigma_y = args.sigma_y
-        
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
         idx_so_far = args.subset_start
         avg_psnr = 0.0
         pbar = tqdm.tqdm(val_loader)
-        A = torch.nn.Identity()
+        
+        scale = round(args.deg_scale)
+        self.scale = scale
+        print(args.start_operators, args.gradient_operators)
+        self.start_degradations = self._get_degradations_list(args.start_operators)
+        self.gradient_degradations = self._get_degradations_list(args.gradient_operators)
+
+        self.correction = args.correction_type
+
+        lr = 0.001
+        m_prev = 0.0
+        v_prev = 0.0
         
         for x_orig, classes in pbar:
             x_orig = x_orig.to(self.device)
             x_orig = data_transform(self.config, x_orig)
 
-            y = A(x_orig)
+            y = x_orig
+            for operator in self.start_degradations:
+                y = operator(y)
 
             if config.sampling.batch_size!=1:
                 raise ValueError("please change the config file to set batch size as 1")
@@ -327,8 +377,7 @@ class Diffusion(object):
                     next_t = (torch.ones(n) * j).to(x.device)
                     at = compute_alpha(self.betas, t.long())
                     at_next = compute_alpha(self.betas, next_t.long())
-                    sigma_t = (1 - at_next**2).sqrt()
-                    xt = xs[-1].to('cuda')
+                    xt = xs[-1].to(x.device)
 
                     with torch.no_grad():
                         et = model(xt, t)
@@ -340,7 +389,11 @@ class Diffusion(object):
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
 
-                    gradient = at.sqrt() * self.grad_and_value(A, xt, x0_t, y)
+                    gradient = at.sqrt() * self.take_grad(self.gradient_degradations, xt, x0_t, y)
+                    if self.correction == 'momentum':
+                        self.corr_func = self.momentum_corrector(lr, gradient, m_prev)
+                    elif self.correction == 'adam':
+                        self.corr_func = self.adam_corrector(lr, i, gradient, v_prev, m_prev)
                     xt_next = xt_next - rate * gradient
 
                     xt_next.detach_()
@@ -354,7 +407,7 @@ class Diffusion(object):
                 else: # time-travel back
                     next_t = (torch.ones(n) * j).to(x.device)
                     at_next = compute_alpha(self.betas, next_t.long())
-                    x0_t = x0_preds[-1].to('cuda')
+                    x0_t = x0_preds[-1].to(x.device)
 
                     xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
 
