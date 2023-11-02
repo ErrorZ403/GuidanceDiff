@@ -97,18 +97,18 @@ def parse_args_and_config():
         default=['bicubic']
     )
     parser.add_argument(
-        "correction_type",
+        "--correction_type",
         type=str,
         default=None
     )
     parser.add_argument(
-        "rates",
+        "--rates",
         nargs="+",
         type=float,
         default=[5]
     )
     parser.add_argument(
-        "loss",
+        "--loss",
         type=str,
         default='L1'
     )

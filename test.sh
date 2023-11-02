@@ -1,3 +1,1 @@
-python main.py --ni --config imagenet_256.yml --path_y imagenet --eta 0.85 \ 
-        --deg_scale 4 --sigma_y 0. --start_operators bicubic --gradient_operators bicubic \
-        -i imagenet_sr_bc_4
+python main.py --ni --config celeba_hq.yml --path_y celeba_hq --eta 0.85 --deg "sr_bicubic" --deg_scale 4 --start_operators bicubic --gradient_operators bicubic -i celeba_hq_test
