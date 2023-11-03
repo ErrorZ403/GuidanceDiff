@@ -225,7 +225,7 @@ class Diffusion(object):
 
         gradient = lr * m
 
-        return gradient
+        return gradient, m
 
     def adam_corrector(self, lr, t, gradient, v_prev, m_prev):
         m = m_prev * self.rate_m + (1 - self.rate_m) * gradient
@@ -236,25 +236,25 @@ class Diffusion(object):
 
         gradient = lr * m_hat / (v_hat.sqrt() + 1e-8)
 
-        return gradient
+        return gradient, m_hat, v_hat
 
     def _get_degradations_list(self, operators_list):
         operators = []
         for operator in operators_list:
             if operator == 'bicubic':
-                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='bicubic').clamp_(0.0, 1.0)
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='bicubic').clamp_(-1.0, 1.0)
             elif operator == 'nearest':
-                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest').clamp_(0.0, 1.0)
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest').clamp_(-1.0, 1.0)
             elif operator == 'linear':
-                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='linear').clamp_(0.0, 1.0)
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='linear').clamp_(-1.0, 1.0)
             elif operator == 'bilinear':
-                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='bilinear').clamp_(0.0, 1.0)
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='bilinear').clamp_(-1.0, 1.0)
             elif operator == 'trilinear':
-                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='trilinear').clamp_(0.0, 1.0)
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='trilinear').clamp_(-1.0, 1.0)
             elif operator == 'area':
-                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='area').clamp_(0.0, 1.0)
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='area').clamp_(-1.0, 1.0)
             elif operator == 'nearest-exact':
-                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest-exact').clamp_(0.0, 1.0)
+                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest-exact').clamp_(-1.0, 1.0)
             else:
                 raise ValueError(f'Operator {operator} have not been implemented yet')
             operators.append(A)
@@ -394,9 +394,9 @@ class Diffusion(object):
 
                     gradient = at.sqrt() * self.take_grad(self.gradient_degradations, xt, x0_t, y, self.losses)
                     if self.correction == 'momentum':
-                        self.corr_func = self.momentum_corrector(lr, gradient, m_prev)
+                        gradient, m_prev = self.momentum_corrector(lr, gradient, m_prev)
                     elif self.correction == 'adam':
-                        self.corr_func = self.adam_corrector(lr, i, gradient, v_prev, m_prev)
+                        gradient, m_зrev, v_prev = self.adam_corrector(lr, i, gradient, v_prev, m_prev)
                     xt_next = xt_next - rate * gradient
 
                     xt_next.detach_()
