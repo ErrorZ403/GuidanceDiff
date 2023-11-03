@@ -11,6 +11,7 @@ import torch.utils.data as data
 from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
+from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
 
 import torchvision.utils as tvu
 
@@ -207,36 +208,15 @@ class Diffusion(object):
                  )
             self.freedom(model, cls_fn)
             
-    def take_grad(self, operators, x, x_hat, measurement, losses):
-        loss_value = 0.0
-
+    def take_grad(self, operators, x, x_hat, measurement):
         for operator in operators:
             x_hat = operator(x_hat)
-
-        for loss in losses:
-            loss_value += loss(x_hat, measurement)
-            loss_value.backward()
-            gradient = x.grad
+        
+        difference = x_hat - measurement
+        loss_value = torch.linalg.norm(difference)
+        gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
 
         return gradient
-    
-    def momentum_corrector(self, lr, gradient, m_prev):
-        m = self.rate_m * m_prev + gradient
-
-        gradient = lr * m
-
-        return gradient, m
-
-    def adam_corrector(self, lr, t, gradient, v_prev, m_prev):
-        m = m_prev * self.rate_m + (1 - self.rate_m) * gradient
-        v = v_prev * self.rate_v + (1 - self.rate_v) * gradient ** 2
-
-        m_hat = m / (1 - self.rate_m ** (self.num_diffusion_timesteps - t + 1))
-        v_hat = v / (1 - self.rate_v ** (self.num_diffusion_timesteps - t + 1))
-
-        gradient = lr * m_hat / (v_hat.sqrt() + 1e-8)
-
-        return gradient, m_hat, v_hat
 
     def _get_degradations_list(self, operators_list):
         operators = []
@@ -261,19 +241,19 @@ class Diffusion(object):
 
         return operators
 
-    def _get_losses(self, loss):
-        losses = []
-        if loss == 'L1':
-            losses.append(torch.nn.L1Loss())
-        elif loss == 'L2':
-            losses.append(torch.nn.MSELoss())
-        elif loss == 'L1+L2':
-            losses.append(torch.nn.L1Loss())
-            losses.append(torch.nn.MSELoss())
-        else:
-            raise ValueError(f'Loss {loss} have not been implemented yet')
+    # def _get_losses(self, loss):
+    #     losses = []
+    #     if loss == 'L1':
+    #         losses.append(torch.nn.L1Loss())
+    #     elif loss == 'L2':
+    #         losses.append(torch.nn.MSELoss())
+    #     elif loss == 'L1+L2':
+    #         losses.append(torch.nn.L1Loss())
+    #         losses.append(torch.nn.MSELoss())
+    #     else:
+    #         raise ValueError(f'Loss {loss} have not been implemented yet')
         
-        return losses
+    #     return losses
 
     def freedom(self, model, cls_fn):
         args, config = self.args, self.config
@@ -318,12 +298,16 @@ class Diffusion(object):
         self.gradient_degradations = self._get_degradations_list(args.gradient_operators)
 
         self.correction = args.correction_type
+        lr = 1.0
+        rate_m = 0.9
+        rate_v = 0.99
 
-        lr = 0.001
-        m_prev = 0.0
-        v_prev = 0.0
+        if self.correction == 'momentum':
+            self.momentum_corrector = MomentumCorrector(lr, rate_m)
+        elif self.correction == 'adam':
+            self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, self.num_diffusion_timesteps)
 
-        self.losses = self._get_losses(args.loss)
+        #self.losses = self._get_losses(args.loss)
         
         for x_orig, classes in pbar:
             x_orig = x_orig.to(self.device)
@@ -392,11 +376,11 @@ class Diffusion(object):
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
 
-                    gradient = at.sqrt() * self.take_grad(self.gradient_degradations, xt, x0_t, y, self.losses)
+                    gradient = at.sqrt() * self.take_grad(self.gradient_degradations, xt, x0_t, y)
                     if self.correction == 'momentum':
-                        gradient, m_prev = self.momentum_corrector(lr, gradient, m_prev)
+                        gradient = self.momentum_corrector(gradient)
                     elif self.correction == 'adam':
-                        gradient, m_зrev, v_prev = self.adam_corrector(lr, i, gradient, v_prev, m_prev)
+                        gradient = self.adam_corrector(gradient, i)
                     xt_next = xt_next - rate * gradient
 
                     xt_next.detach_()
