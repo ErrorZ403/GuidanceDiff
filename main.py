@@ -42,9 +42,9 @@ def parse_args_and_config():
         "--eta", type=float, default=0.85, help="Eta"
     )    
     parser.add_argument(
-        "--simplified",
-        action="store_true",
-        help="Use simplified DDNM, without SVD",
+        "--algorithm",
+        type=str,
+        default='freedom'
     )    
     parser.add_argument(
         "-i",
@@ -191,7 +191,7 @@ def main():
 
     try:
         runner = Diffusion(args, config)
-        runner.sample(args.simplified)
+        runner.sample(args.algorithm)
     except Exception:
         logging.error(traceback.format_exc())
 

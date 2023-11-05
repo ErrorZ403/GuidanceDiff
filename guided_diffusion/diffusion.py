@@ -113,7 +113,7 @@ class Diffusion(object):
         elif self.model_var_type == "fixedsmall":
             self.logvar = posterior_variance.clamp(min=1e-20).log()
 
-    def sample(self, simplified):
+    def sample(self, algorithm):
         cls_fn = None
         if self.config.model.type == 'simple':
             model = Model(self.config)
@@ -191,7 +191,7 @@ class Diffusion(object):
 
                 cls_fn = cond_fn
 
-        if simplified:
+        if algorithm == 'ddnm_simplified':
             print('Run Simplified DDNM, without SVD.',
                   f'{self.config.time_travel.T_sampling} sampling steps.',
                   f'travel_length = {self.config.time_travel.travel_length},',
@@ -199,14 +199,23 @@ class Diffusion(object):
                   f'Task: {self.args.deg}.'
                  )
             self.simplified_ddnm_plus(model, cls_fn)
-        else:
+        elif algorithm == 'ddnm_svd':
             print('Run SVD-based DDNM.',
                   f'{self.config.time_travel.T_sampling} sampling steps.',
                   f'travel_length = {self.config.time_travel.travel_length},',
                   f'travel_repeat = {self.config.time_travel.travel_repeat}.',
                   f'Task: {self.args.deg}.'
                  )
-            self.freedom(model, cls_fn)
+            self.svd_based_ddnm_plus(model, cls_fn)
+        else:
+            print('Run FreeDoM.',
+                  f'{self.config.time_travel.T_sampling} sampling steps.',
+                  f'travel_length = {self.config.time_travel.travel_length},',
+                  f'travel_repeat = {self.config.time_travel.travel_repeat}.',
+                  f'Task: {self.args.deg}.'
+                 )
+            
+            self.freedom(model)
             
     def take_grad(self, operators, x, x_hat, measurement):
         for operator in operators:
@@ -241,24 +250,10 @@ class Diffusion(object):
 
         return operators
 
-    # def _get_losses(self, loss):
-    #     losses = []
-    #     if loss == 'L1':
-    #         losses.append(torch.nn.L1Loss())
-    #     elif loss == 'L2':
-    #         losses.append(torch.nn.MSELoss())
-    #     elif loss == 'L1+L2':
-    #         losses.append(torch.nn.L1Loss())
-    #         losses.append(torch.nn.MSELoss())
-    #     else:
-    #         raise ValueError(f'Loss {loss} have not been implemented yet')
-        
-    #     return losses
-
-    def freedom(self, model, cls_fn):
+    def freedom(self, model):
         args, config = self.args, self.config
 
-        dataset, test_dataset = get_dataset(args, config)
+        _, test_dataset = get_dataset(args, config)
 
         if args.subset_start >= 0 and args.subset_end > 0:
             assert args.subset_end > args.subset_start
@@ -305,11 +300,9 @@ class Diffusion(object):
         if self.correction == 'momentum':
             self.momentum_corrector = MomentumCorrector(lr, rate_m)
         elif self.correction == 'adam':
-            self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, self.num_diffusion_timesteps)
-
-        #self.losses = self._get_losses(args.loss)
+            self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
         
-        for x_orig, classes in pbar:
+        for x_orig, _ in pbar:
             x_orig = x_orig.to(self.device)
             x_orig = data_transform(self.config, x_orig)
 
@@ -333,7 +326,7 @@ class Diffusion(object):
                 
             # init x_T
             x = torch.randn(
-                10,
+                50,
                 config.data.channels,
                 config.data.image_size,
                 config.data.image_size,
@@ -354,7 +347,6 @@ class Diffusion(object):
             time_pairs = list(zip(times[:-1], times[1:]))
             rate = 5
             
-            # reverse diffusion sampling
             for i, j in tqdm.tqdm(time_pairs):
                 i, j = i*skip, j*skip
                 if j<0: j=-1 
