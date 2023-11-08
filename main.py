@@ -107,12 +107,6 @@ def parse_args_and_config():
         type=float,
         default=[5]
     )
-    parser.add_argument(
-        "--loss",
-        type=str,
-        default='L1'
-    )
-
     
 
     args = parser.parse_args()
