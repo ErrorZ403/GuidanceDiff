@@ -14,7 +14,7 @@ from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
 
 import torchvision.utils as tvu
-
+from guided_diffusion.matlab_imresize import imresize
 from guided_diffusion.models import Model
 from guided_diffusion.script_util import create_model, create_classifier, classifier_defaults, args_to_dict
 import random
@@ -231,7 +231,7 @@ class Diffusion(object):
         operators = []
         for operator in operators_list:
             if operator == 'bicubic':
-                A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='bicubic').clamp_(-1.0, 1.0)
+                A = lambda z: imresize(z, scalar_scale=1/self.scale)
             elif operator == 'nearest':
                 A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest').clamp_(-1.0, 1.0)
             elif operator == 'linear':
@@ -293,15 +293,17 @@ class Diffusion(object):
         self.gradient_degradations = self._get_degradations_list(args.gradient_operators)
 
         self.correction = args.correction_type
-        lr = 1.0
+        lr = 0.001
         rate_m = 0.9
-        rate_v = 0.99
+        rate_v = 0.999
 
         if self.correction == 'momentum':
             self.momentum_corrector = MomentumCorrector(lr, rate_m)
         elif self.correction == 'adam':
             self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
         
+        rate = 15
+
         for x_orig, _ in pbar:
             x_orig = x_orig.to(self.device)
             x_orig = data_transform(self.config, x_orig)
@@ -345,7 +347,6 @@ class Diffusion(object):
                                             config.time_travel.travel_repeat,
                                             )
             time_pairs = list(zip(times[:-1], times[1:]))
-            rate = 5
             
             for i, j in tqdm.tqdm(time_pairs):
                 i, j = i*skip, j*skip

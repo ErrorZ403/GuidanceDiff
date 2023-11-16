@@ -25,7 +25,7 @@ class AdamCorrector(nn.Module):
         self.rate_m = rate_m
         self.rate_v = rate_v
         self.num_diffusion_timesteps = num_diff_timestemps
-
+        
     def forward(self, grad, t):
         self.m = self.m * self.rate_m + (1 - self.rate_m) * grad
         self.v = self.v * self.rate_v + (1 - self.rate_v) * grad ** 2
