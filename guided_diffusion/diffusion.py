@@ -231,7 +231,7 @@ class Diffusion(object):
         operators = []
         for operator in operators_list:
             if operator == 'bicubic':
-                A = lambda z: imresize(z, scalar_scale=1/self.scale)
+                A = lambda z: imresize(z, scale=1/self.scale)
             elif operator == 'nearest':
                 A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest').clamp_(-1.0, 1.0)
             elif operator == 'linear':
