@@ -359,8 +359,7 @@ class Diffusion(object):
                     at_next = compute_alpha(self.betas, next_t.long())
                     xt = xs[-1].to(x.device)
 
-                    with torch.no_grad():
-                        et = model(xt, t)
+                    et = model(xt, t)
 
                     if et.size(1) == 6:
                         et = et[:, :3]
