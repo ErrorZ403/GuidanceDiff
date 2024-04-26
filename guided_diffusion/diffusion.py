@@ -469,8 +469,8 @@ class Diffusion(object):
         net.load_state_dict(torch.load(args.model_path, location='cpu'))
         net.to('cuda')
 
-        for data, _ in pbar:
-            x_orig = data['LQ']
+        for d, _ in pbar:
+            x_orig = d['LQ']
             x_orig = x_orig.to(self.device)
             x_orig = data_transform(self.config, x_orig)
 
@@ -573,7 +573,7 @@ class Diffusion(object):
                 y_restored, os.path.join(self.args.image_folder, f"restored_{idx_so_far + j}_{0}.png")
             )
             #orig = inverse_data_transform(config, x_orig[0])
-            mse = torch.mean((x[0].to(self.device) - data['HQ']) ** 2)
+            mse = torch.mean((x[0].to(self.device) - d['HQ']) ** 2)
             mse_rest = torch.mean((y_restored.to(self.device) - data['HQ']) ** 2)
             psnr = 10 * torch.log10(1 / mse)
             psnr_rest = 10 * torch.log10(1 / mse_rest)
