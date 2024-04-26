@@ -13,6 +13,7 @@ from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
 
+from guided_diffusion.rest_models.wgms import UNet as WGMS
 import torchvision.utils as tvu
 from guided_diffusion.matlab_imresize import imresize
 from guided_diffusion.models import Model
@@ -401,6 +402,174 @@ class Diffusion(object):
             )
             orig = inverse_data_transform(config, x_orig[0])
             mse = torch.mean((x[0].to(self.device) - orig) ** 2)
+            psnr = 10 * torch.log10(1 / mse)
+            avg_psnr += psnr
+
+            idx_so_far += y.shape[0]
+
+            pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
+
+        avg_psnr = avg_psnr / (idx_so_far - idx_init)
+        print("Total Average PSNR: %.2f" % avg_psnr)
+        print("Number of samples: %d" % (idx_so_far - idx_init))
+
+    def feedback(self, model):
+        args, config = self.args, self.config
+
+        _, test_dataset = get_dataset(args, config)
+
+        if args.subset_start >= 0 and args.subset_end > 0:
+            assert args.subset_end > args.subset_start
+            test_dataset = torch.utils.data.Subset(test_dataset, range(args.subset_start, args.subset_end))
+        else:
+            args.subset_start = 0
+            args.subset_end = len(test_dataset)
+
+        print(f'Dataset has size {len(test_dataset)}')
+
+        def seed_worker(worker_id):
+            worker_seed = args.seed % 2 ** 32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+
+        g = torch.Generator()
+        g.manual_seed(args.seed)
+        val_loader = data.DataLoader(
+            test_dataset,
+            batch_size=config.sampling.batch_size,
+            shuffle=True,
+            num_workers=config.data.num_workers,
+            worker_init_fn=seed_worker,
+            generator=g,
+        )
+        
+        print(f'Start from {args.subset_start}')
+        idx_init = args.subset_start
+        idx_so_far = args.subset_start
+        avg_psnr = 0.0
+        pbar = tqdm.tqdm(val_loader)
+        
+        scale = round(args.deg_scale)
+        self.scale = scale
+
+        self.correction = args.correction_type
+        lr = 0.001
+        rate_m = 0.9
+        rate_v = 0.999
+
+        if self.correction == 'momentum':
+            self.momentum_corrector = MomentumCorrector(lr, rate_m)
+        elif self.correction == 'adam':
+            self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
+        
+        rate = 15
+
+        net = WGMS()
+        net.load_state_dict(torch.load(args.model_path, location='cpu'))
+        net.to('cuda')
+
+        for data, _ in pbar:
+            x_orig = data['LQ']
+            x_orig = x_orig.to(self.device)
+            x_orig = data_transform(self.config, x_orig)
+
+            y = x_orig
+            with torch.no_grad():
+                y_restored = net(y)
+
+            if config.sampling.batch_size!=1:
+                raise ValueError("please change the config file to set batch size as 1")
+
+            os.makedirs(os.path.join(self.args.image_folder, "Apy"), exist_ok=True)
+            for i in range(len(y)):
+                tvu.save_image(
+                    inverse_data_transform(config, y[i]),
+                    os.path.join(self.args.image_folder, f"Apy/Apy_{idx_so_far + i}.png")
+                )
+                tvu.save_image(
+                    inverse_data_transform(config, x_orig[i]),
+                    os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
+                )
+                
+            # init x_T
+            x = torch.randn(
+                50,
+                config.data.channels,
+                config.data.image_size,
+                config.data.image_size,
+                device=self.device,
+            )
+            choice = np.random.randint(0, 10)
+            x = x[choice:choice + 1]
+
+            skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
+            n = x.size(0)
+            x0_preds = []
+            xs = [x]
+            
+            times = get_schedule_jump(config.time_travel.T_sampling, 
+                                            config.time_travel.travel_length, 
+                                            config.time_travel.travel_repeat,
+                                            )
+            time_pairs = list(zip(times[:-1], times[1:]))
+            
+            for i, j in tqdm.tqdm(time_pairs):
+                i, j = i*skip, j*skip
+                if j<0: j=-1 
+
+                if j < i: # normal sampling 
+                    t = (torch.ones(n) * i).to(x.device)
+                    next_t = (torch.ones(n) * j).to(x.device)
+                    at = compute_alpha(self.betas, t.long())
+                    at_next = compute_alpha(self.betas, next_t.long())
+                    sigma_t = (1 - at_next**2).sqrt()
+                    xt = xs[-1].to(x.device)
+
+                    et = model(xt, t)
+
+                    if et.size(1) == 6:
+                        et = et[:, :3]
+
+                    #xt_next = at_next.sqrt()*((xt - (1 - at).sqrt() * et) / at.sqrt()) + (1 - at_next).sqrt() * et
+                    
+                    xt = xt.requires_grad_()
+                    x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
+
+                    gradient_hq = at.sqrt() * self.take_grad([], xt, x0_t, y_restored)
+                    gradient_lq = at.sqrt() * self.take_grad([], xt, x0_t, y)
+                    if self.correction == 'momentum':
+                        gradient = self.momentum_corrector(gradient)
+                    elif self.correction == 'adam':
+                        gradient = self.adam_corrector(gradient, i)
+                    x0_t = x0_t - gradient_hq + gradient_lq
+                    xt_next = (1 - self.betas[t]).sqrt()*(1 - at_next)/(1 - at)*xt + at_next.sqrt()*self.betas[t]/(1 - at)*x0_t + sigma_t * torch.rand_like(xt)
+
+                    xt_next.detach_()
+                    x0_t = x0_t.detach_()
+                    xt = xt.detach()
+                    torch.cuda.empty_cache()
+                
+                    x0_preds.append(x0_t.to('cpu'))
+                    xs.append(xt_next.to('cpu'))    
+                
+                else: # time-travel back
+                    next_t = (torch.ones(n) * j).to(x.device)
+                    at_next = compute_alpha(self.betas, next_t.long())
+                    x0_t = x0_preds[-1].to(x.device)
+
+                    xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
+
+                    xs.append(xt_next.to('cpu'))
+
+            x = xs[-1]
+            
+            x = [inverse_data_transform(config, xi) for xi in x]
+
+            tvu.save_image(
+                x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
+            )
+            #orig = inverse_data_transform(config, x_orig[0])
+            mse = torch.mean((x[0].to(self.device) - data['HQ']) ** 2)
             psnr = 10 * torch.log10(1 / mse)
             avg_psnr += psnr
 

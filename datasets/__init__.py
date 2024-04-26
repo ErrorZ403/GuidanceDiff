@@ -1,6 +1,7 @@
 import os
 import torch
 import numbers
+from datasets.raindataset import RainDataset
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as F
 from datasets.celeba import CelebA
@@ -187,6 +188,12 @@ def get_dataset(args, config):
                 transforms.ToTensor()])
             )
             test_dataset = dataset
+    elif config.data.dataset == 'Weather':
+        dataset = RainDataset(
+            os.path.join(args.exp, 'datasets', 'rain', 'hq'), 
+            os.path.join(args.exp, 'datasets', 'rain', 'lq')
+            )
+        test_dataset = dataset
     else:
         dataset, test_dataset = None, None
 

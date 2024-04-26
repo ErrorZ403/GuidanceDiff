@@ -107,6 +107,11 @@ def parse_args_and_config():
         type=float,
         default=[5]
     )
+    parser.add_argument(
+        '--model_path',
+        type=str,
+        default=None
+    )
     
 
     args = parser.parse_args()
