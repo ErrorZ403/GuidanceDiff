@@ -400,6 +400,7 @@ class Diffusion(object):
             tvu.save_image(
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
             )
+            
             orig = inverse_data_transform(config, x_orig[0])
             mse = torch.mean((x[0].to(self.device) - orig) ** 2)
             psnr = 10 * torch.log10(1 / mse)
@@ -564,18 +565,25 @@ class Diffusion(object):
             x = xs[-1]
             
             x = [inverse_data_transform(config, xi) for xi in x]
-
+            y_restored = inverse_data_transform(y_restored)
             tvu.save_image(
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
             )
+            tvu.save_image(
+                y_restored, os.path.join(self.args.image_folder, f"restored_{idx_so_far + j}_{0}.png")
+            )
             #orig = inverse_data_transform(config, x_orig[0])
             mse = torch.mean((x[0].to(self.device) - data['HQ']) ** 2)
+            mse_rest = torch.mean((y_restored.to(self.device) - data['HQ']) ** 2)
             psnr = 10 * torch.log10(1 / mse)
+            psnr_rest = 10 * torch.log10(1 / mse_rest)
+            
             avg_psnr += psnr
 
             idx_so_far += y.shape[0]
 
             pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
+            print(psnr_rest)
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
         print("Total Average PSNR: %.2f" % avg_psnr)
