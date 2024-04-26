@@ -216,7 +216,7 @@ class Diffusion(object):
                   f'Task: {self.args.deg}.'
                  )
             
-            self.freedom(model)
+            self.feedback(model)
             
     def take_grad(self, operators, x, x_hat, measurement):
         for operator in operators:
