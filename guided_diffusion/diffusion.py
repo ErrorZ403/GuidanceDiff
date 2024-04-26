@@ -228,6 +228,17 @@ class Diffusion(object):
 
         return gradient
 
+    def take_grad_rest(self, x, x_hat, y, y_rest):
+        difference_lq = x_hat - y
+        difference_hq = x_hat - y_rest
+        loss_value_lq = torch.linalg.norm(difference_lq)
+        loss_value_hq = torch.linalg.norm(difference_hq)
+        loss_value = loss_value_hq - loss_value_lq
+
+        gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
+
+        return gradient
+
     def _get_degradations_list(self, operators_list):
         operators = []
         for operator in operators_list:
@@ -441,14 +452,13 @@ class Diffusion(object):
             shuffle=True,
             num_workers=config.data.num_workers,
             worker_init_fn=seed_worker,
-            generator=g,
         )
         
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
         idx_so_far = args.subset_start
         avg_psnr = 0.0
-        pbar = tqdm.tqdm(val_loader)
+        #pbar = tqdm.tqdm(val_loader)
         
         scale = round(args.deg_scale)
         self.scale = scale
@@ -463,18 +473,23 @@ class Diffusion(object):
         elif self.correction == 'adam':
             self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
         
-        rate = 15
+        rate = 50
 
         net = WGMS()
-        net.load_state_dict(torch.load(args.model_path, location='cpu'))
+        net.load_state_dict(torch.load(args.model_path, map_location='cpu'))
         net.to('cuda')
 
-        for d, _ in pbar:
+        for d in test_dataset:
+            print(type(d))
+            #print(a)
+            H, W, C = d['HQ'].shape
+            d['HQ'] = d['HQ'].view(1, H, W, C)
+            d['LQ'] = d['LQ'].view(1, H, W, C)
             x_orig = d['LQ']
             x_orig = x_orig.to(self.device)
             x_orig = data_transform(self.config, x_orig)
-
             y = x_orig
+            
             with torch.no_grad():
                 y_restored = net(y)
 
@@ -536,15 +551,20 @@ class Diffusion(object):
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
 
-                    gradient_hq = at.sqrt() * self.take_grad([], xt, x0_t, y_restored)
-                    gradient_lq = at.sqrt() * self.take_grad([], xt, x0_t, y)
+                    gradient = at.sqrt() * self.take_grad_rest(xt, x0_t, y, y_restored)
                     if self.correction == 'momentum':
                         gradient = self.momentum_corrector(gradient)
                     elif self.correction == 'adam':
                         gradient = self.adam_corrector(gradient, i)
-                    x0_t = x0_t - gradient_hq + gradient_lq
-                    xt_next = (1 - self.betas[t]).sqrt()*(1 - at_next)/(1 - at)*xt + at_next.sqrt()*self.betas[t]/(1 - at)*x0_t + sigma_t * torch.rand_like(xt)
+                    
+                    c1 = at_next.sqrt() * (1 - at / at_next) / (1 - at)
+                    c2 = (at / at_next).sqrt() * (1 - at_next) / (1 - at)
+                    c3 = (1 - at_next) * (1 - at / at_next) / (1 - at)
+                    c3 = (c3.log() * 0.5).exp()
+                    xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
 
+                    xt_next = xt_next - rate * gradient
+                    
                     xt_next.detach_()
                     x0_t = x0_t.detach_()
                     xt = xt.detach()
@@ -565,7 +585,7 @@ class Diffusion(object):
             x = xs[-1]
             
             x = [inverse_data_transform(config, xi) for xi in x]
-            y_restored = inverse_data_transform(y_restored)
+            y_restored = inverse_data_transform(config, y_restored)
             tvu.save_image(
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
             )
@@ -573,8 +593,8 @@ class Diffusion(object):
                 y_restored, os.path.join(self.args.image_folder, f"restored_{idx_so_far + j}_{0}.png")
             )
             #orig = inverse_data_transform(config, x_orig[0])
-            mse = torch.mean((x[0].to(self.device) - d['HQ']) ** 2)
-            mse_rest = torch.mean((y_restored.to(self.device) - data['HQ']) ** 2)
+            mse = torch.mean((x[0] - d['HQ']) ** 2)
+            mse_rest = torch.mean((y_restored.detach().to('cpu') - d['HQ']) ** 2)
             psnr = 10 * torch.log10(1 / mse)
             psnr_rest = 10 * torch.log10(1 / mse_rest)
             
@@ -582,7 +602,7 @@ class Diffusion(object):
 
             idx_so_far += y.shape[0]
 
-            pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
+            print(psnr)
             print(psnr_rest)
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
