@@ -14,6 +14,7 @@ from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
 
 from guided_diffusion.rest_models.wgms import UNet as WGMS
+from guided_diffusion.rest_models.restormer import Restormer
 import torchvision.utils as tvu
 from guided_diffusion.matlab_imresize import imresize
 from guided_diffusion.models import Model
@@ -233,7 +234,7 @@ class Diffusion(object):
         difference_hq = x_hat - y_rest
         loss_value_lq = torch.linalg.norm(difference_lq)
         loss_value_hq = torch.linalg.norm(difference_hq)
-        loss_value = loss_value_hq - loss_value_lq
+        loss_value = loss_value_hq - 0.1*loss_value_lq
 
         gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
 
@@ -458,13 +459,14 @@ class Diffusion(object):
         idx_init = args.subset_start
         idx_so_far = args.subset_start
         avg_psnr = 0.0
+        avg_psnr_rest = 0.0
         #pbar = tqdm.tqdm(val_loader)
         
         scale = round(args.deg_scale)
         self.scale = scale
 
         self.correction = args.correction_type
-        lr = 0.001
+        lr = 1
         rate_m = 0.9
         rate_v = 0.999
 
@@ -473,10 +475,10 @@ class Diffusion(object):
         elif self.correction == 'adam':
             self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
         
-        rate = 50
+        rate = 20
 
-        net = WGMS()
-        net.load_state_dict(torch.load(args.model_path, map_location='cpu'))
+        net = Restormer()
+        net.load_state_dict(torch.load(args.model_path, map_location='cpu')['params'])
         net.to('cuda')
 
         for d in test_dataset:
@@ -487,11 +489,14 @@ class Diffusion(object):
             d['LQ'] = d['LQ'].view(1, H, W, C)
             x_orig = d['LQ']
             x_orig = x_orig.to(self.device)
-            x_orig = data_transform(self.config, x_orig)
             y = x_orig
             
             with torch.no_grad():
                 y_restored = net(y)
+
+            y = data_transform(self.config, y)
+            x_orig = data_transform(self.config, x_orig)
+            y_restored = data_transform(self.config, y_restored)
 
             if config.sampling.batch_size!=1:
                 raise ValueError("please change the config file to set batch size as 1")
@@ -551,7 +556,7 @@ class Diffusion(object):
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
 
-                    gradient = at.sqrt() * self.take_grad_rest(xt, x0_t, y, y_restored)
+                    gradient = self.take_grad_rest(xt, x0_t, y, y_restored)
                     if self.correction == 'momentum':
                         gradient = self.momentum_corrector(gradient)
                     elif self.correction == 'adam':
@@ -561,9 +566,11 @@ class Diffusion(object):
                     c2 = (at / at_next).sqrt() * (1 - at_next) / (1 - at)
                     c3 = (1 - at_next) * (1 - at / at_next) / (1 - at)
                     c3 = (c3.log() * 0.5).exp()
+                    x0_t = x0_t - rate * gradient
+
                     xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
 
-                    xt_next = xt_next - rate * gradient
+                    #xt_next = xt_next - rate * gradient
                     
                     xt_next.detach_()
                     x0_t = x0_t.detach_()
@@ -599,6 +606,7 @@ class Diffusion(object):
             psnr_rest = 10 * torch.log10(1 / mse_rest)
             
             avg_psnr += psnr
+            avg_psnr_rest += psnr_rest
 
             idx_so_far += y.shape[0]
 
@@ -606,7 +614,9 @@ class Diffusion(object):
             print(psnr_rest)
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
+        avg_psnr_rest = avg_psnr_rest / (idx_so_far - idx_init)
         print("Total Average PSNR: %.2f" % avg_psnr)
+        print("Total Average Restormer PSNR: %.2f" % avg_psnr_rest)
         print("Number of samples: %d" % (idx_so_far - idx_init))
 
     def simplified_ddnm_plus(self, model, cls_fn):
