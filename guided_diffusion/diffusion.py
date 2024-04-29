@@ -13,8 +13,8 @@ from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
 
-from guided_diffusion.rest_models.wgms import UNet as WGMS
-from guided_diffusion.rest_models.restormer import Restormer
+#from guided_diffusion.rest_models.wgms import UNet as WGMS
+#from guided_diffusion.rest_models.restormer import Restormer
 from guided_diffusion.contras_extractor_vgg import ContrasExtractorSep as VGG
 import torchvision.utils as tvu
 from guided_diffusion.matlab_imresize import imresize
@@ -218,7 +218,7 @@ class Diffusion(object):
                   f'Task: {self.args.deg}.'
                  )
             
-            self.feedback(model)
+            self.reference_guided(model)
             
     def take_grad(self, operators, x, x_hat, measurement):
         for operator in operators:
@@ -242,7 +242,7 @@ class Diffusion(object):
             difference_ref = features['dense_features1'] - features['dense_features2']
             loss_value_ref = torch.linalg.norm(difference_ref)
 
-        loss_value = loss_value_pixel + 0.1*loss_value_ref
+        loss_value = loss_value_pixel + 0.05*loss_value_ref
 
         gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
 
@@ -253,7 +253,7 @@ class Diffusion(object):
         difference_hq = x_hat - y_rest
         loss_value_lq = torch.linalg.norm(difference_lq)
         loss_value_hq = torch.linalg.norm(difference_hq)
-        loss_value = loss_value_hq - 0.1*loss_value_lq
+        loss_value = loss_value_hq + 0.005*loss_value_lq
 
         gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
 
@@ -681,8 +681,8 @@ class Diffusion(object):
         self.gradient_degradations = self._get_degradations_list(args.gradient_operators)
 
         feature_extractor = VGG()
-        feature_extractor.load_state_dict(torch.load(args.ref_feats_path, map_location='cpu'))
-        feature_extractor.to('cuda')
+        #feature_extractor.load_state_dict(torch.load(args.ref_feats_path, map_location='cpu'))
+        feature_extractor.to(self.device)
 
         self.correction = args.correction_type
         lr = 0.001
@@ -694,12 +694,12 @@ class Diffusion(object):
         elif self.correction == 'adam':
             self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
         
-        rate = 15
+        rate = 50
 
         for d in test_dataset:
             H, W, C = d['HQ'].shape
             d['HQ'] = d['HQ'].view(1, H, W, C)
-            d['Ref'] = d['Ref'].view(1, H, W, C)
+            d['Ref'] = d['Ref'].view(1, H, W, C).to(self.device)
             x_orig = d['HQ']
             x_orig = x_orig.to(self.device)
             x_orig = data_transform(self.config, x_orig)
@@ -760,27 +760,37 @@ class Diffusion(object):
                     if et.size(1) == 6:
                         et = et[:, :3]
 
-                    xt_next = at_next.sqrt()*((xt - (1 - at).sqrt() * et) / at.sqrt()) + (1 - at_next).sqrt() * et
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
                     
-                    features = feature_extractor(inverse_data_transform(config, x0_t), d['Ref'])
+                    features = None
+                    if i <= 30:
+                      rate = 15
+                      features = feature_extractor(inverse_data_transform(config, x0_t), d['Ref'])
 
                     gradient = self.take_grad_ref(self.gradient_degradations, xt, x0_t, y, features)
+                    
                     if self.correction == 'momentum':
                         gradient = self.momentum_corrector(gradient)
                     elif self.correction == 'adam':
                         gradient = self.adam_corrector(gradient, i)
-                    xt_next = xt_next - rate * gradient
+                    
+                    c1 = at_next.sqrt() * (1 - at / at_next) / (1 - at)
+                    c2 = (at / at_next).sqrt() * (1 - at_next) / (1 - at)
+                    c3 = (1 - at_next) * (1 - at / at_next) / (1 - at)
+                    c3 = (c3.log() * 0.5).exp()
+                    x0_t = x0_t - rate * gradient
 
+                    xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
+                    
                     xt_next.detach_()
                     x0_t = x0_t.detach_()
                     xt = xt.detach()
                     torch.cuda.empty_cache()
                 
                     x0_preds.append(x0_t.to('cpu'))
-                    xs.append(xt_next.to('cpu'))    
-                
+                    xs.append(xt_next.to('cpu'))   
+
                 else: # time-travel back
                     next_t = (torch.ones(n) * j).to(x.device)
                     at_next = compute_alpha(self.betas, next_t.long())
@@ -798,7 +808,7 @@ class Diffusion(object):
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
             )
             
-            mse = torch.mean((x[0].to(self.device) - d['HQ']) ** 2)
+            mse = torch.mean((x[0].detach().to('cpu') - d['HQ']) ** 2)
             psnr = 10 * torch.log10(1 / mse)
             avg_psnr += psnr
 

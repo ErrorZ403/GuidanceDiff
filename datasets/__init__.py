@@ -200,6 +200,7 @@ def get_dataset(args, config):
             os.path.join(args.exp, 'datasets', 'refsr', 'hq'), 
             os.path.join(args.exp, 'datasets', 'refsr', 'ref')
         )
+        test_dataset = dataset
     else:
         dataset, test_dataset = None, None
 

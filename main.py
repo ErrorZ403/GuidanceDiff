@@ -112,6 +112,11 @@ def parse_args_and_config():
         type=str,
         default=None
     )
+    parser.add_argument(
+        '--ref_feats_path',
+        type=str,
+        default=None
+    )
     
 
     args = parser.parse_args()
