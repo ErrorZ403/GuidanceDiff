@@ -2,6 +2,7 @@ import os
 import torch
 import numbers
 from datasets.raindataset import RainDataset
+from datasets.refdataset import WRSRDataset
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as F
 from datasets.celeba import CelebA
@@ -194,6 +195,11 @@ def get_dataset(args, config):
             os.path.join(args.exp, 'datasets', 'rain', 'lq')
             )
         test_dataset = dataset
+    elif config.data.dataset == "Ref":
+        dataset = WRSRDataset(
+            os.path.join(args.exp, 'datasets', 'refsr', 'hq'), 
+            os.path.join(args.exp, 'datasets', 'refsr', 'ref')
+        )
     else:
         dataset, test_dataset = None, None
 
