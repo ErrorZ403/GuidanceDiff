@@ -13,8 +13,8 @@ from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
 
-#from guided_diffusion.rest_models.wgms import UNet as WGMS
-#from guided_diffusion.rest_models.restormer import Restormer
+from guided_diffusion.rest_models.wgms import UNet as WGMS
+from guided_diffusion.rest_models.restormer import Restormer
 from guided_diffusion.contras_extractor_vgg import ContrasExtractorSep as VGG
 import torchvision.utils as tvu
 from guided_diffusion.matlab_imresize import imresize
@@ -218,7 +218,7 @@ class Diffusion(object):
                   f'Task: {self.args.deg}.'
                  )
             
-            self.reference_guided(model)
+            self.feedback(model)
             
     def take_grad(self, operators, x, x_hat, measurement):
         for operator in operators:
@@ -253,7 +253,10 @@ class Diffusion(object):
         difference_hq = x_hat - y_rest
         loss_value_lq = torch.linalg.norm(difference_lq)
         loss_value_hq = torch.linalg.norm(difference_hq)
-        loss_value = loss_value_hq + 0.005*loss_value_lq
+
+        x_freq, y_freq = self.get_high_pass(x_hat, y)
+        loss_value_freq = torch.linalg.norm(x_freq - y_freq)
+        loss_value = loss_value_hq - 0.25*loss_value_lq #- 0.05*loss_value_freq - 0.25*loss_value_lq
 
         gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
 
@@ -281,6 +284,27 @@ class Diffusion(object):
             operators.append(A)
 
         return operators
+
+    def get_high_pass(self, x, y, filter_rate=0.75):
+        x_freq = torch.fft.fftshift(torch.fft.fft(x))
+        y_freq = torch.fft.fftshift(torch.fft.fft(y))
+
+        h, w = x_freq.shape[2:]
+        cy, cx = int(h/2), int(w/2)
+        rh, rw = int(filter_rate * cy), int(filter_rate * cx)
+        x_freq[..., cy-rh:cy+rh, cx-rw:cx+rw] = 0
+        y_freq[..., cy-rh:cy+rh, cx-rw:cx+rw] = 0
+
+        x_ifft = torch.abs(torch.fft.ifft(torch.fft.ifftshift(x_freq))).clamp(-1.0, 1.0)
+        y_ifft = torch.abs(torch.fft.ifft(torch.fft.ifftshift(y_freq))).clamp(-1.0, 1.0)
+
+        y_ifft_save = inverse_data_transform(self.config, y_ifft)
+        tvu.save_image(
+          y_ifft_save, os.path.join(self.args.image_folder, f"high_y.png")
+        )
+
+        return x_ifft, y_ifft
+
 
     def freedom(self, model):
         args, config = self.args, self.config
