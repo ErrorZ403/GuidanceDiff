@@ -24,7 +24,7 @@ import random
 
 from torchvision.transforms import Compose, Resize, Normalize, InterpolationMode
 BICUBIC = InterpolationMode.BICUBIC
-import clip
+#import clip
 
 from scipy.linalg import orth
 
@@ -222,7 +222,7 @@ class Diffusion(object):
                   f'Task: {self.args.deg}.'
                  )
             
-            self.feedback_clip(model)
+            self.reference_guided(model)
             
     def take_grad(self, operators, x, x_hat, measurement):
         for operator in operators:
@@ -264,7 +264,7 @@ class Diffusion(object):
 
         loss_value_lq, loss_value_hq = torch.linalg.norm(difference_lq), torch.linalg.norm(difference_hq)
 
-        loss_value = loss_value_lq - 0.25*loss_value_hq
+        loss_value = loss_value_lq - 0.1*loss_value_hq
 
         gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
 
@@ -938,7 +938,7 @@ class Diffusion(object):
         idx_init = args.subset_start
         idx_so_far = args.subset_start
         avg_psnr = 0.0
-        pbar = tqdm.tqdm(val_loader)
+        #pbar = tqdm.tqdm(val_loader)
         
         scale = round(args.deg_scale)
         self.scale = scale
@@ -960,7 +960,7 @@ class Diffusion(object):
         elif self.correction == 'adam':
             self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
         
-        rate = 50
+        rate = 90
 
         for d in test_dataset:
             H, W, C = d['HQ'].shape
@@ -1048,7 +1048,8 @@ class Diffusion(object):
                     x0_t = x0_t - rate * gradient
 
                     xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
-                    
+                    #xt_next = xt_next - rate * gradient
+
                     xt_next.detach_()
                     x0_t = x0_t.detach_()
                     xt = xt.detach()
@@ -1080,7 +1081,7 @@ class Diffusion(object):
 
             idx_so_far += y.shape[0]
 
-            print("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
+            print("PSNR: %.2f" % (psnr))
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
         print("Total Average PSNR: %.2f" % avg_psnr)
