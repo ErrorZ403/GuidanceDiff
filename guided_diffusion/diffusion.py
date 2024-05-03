@@ -13,6 +13,7 @@ from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
 
+from guided_diffusion.gradient_functions import *
 from guided_diffusion.rest_models.wgms import UNet as WGMS
 from guided_diffusion.rest_models.restormer import Restormer
 from guided_diffusion.contras_extractor_vgg import ContrasExtractorSep as VGG
@@ -27,6 +28,8 @@ BICUBIC = InterpolationMode.BICUBIC
 #import clip
 
 from scipy.linalg import orth
+from pytorch_ssim import ssim
+from lpips_pytorch import lpips
 
 
 def get_gaussian_noisy_img(img, noise_level):
@@ -214,7 +217,7 @@ class Diffusion(object):
                   f'Task: {self.args.deg}.'
                  )
             self.svd_based_ddnm_plus(model, cls_fn)
-        else:
+        elif algorithm == 'freedom':
             print('Run FreeDoM.',
                   f'{self.config.time_travel.T_sampling} sampling steps.',
                   f'travel_length = {self.config.time_travel.travel_length},',
@@ -222,82 +225,24 @@ class Diffusion(object):
                   f'Task: {self.args.deg}.'
                  )
             
-            self.reference_guided(model)
+            self.freedom_improved(model)
+        else:
+            print('Run Restoration Guidance.',
+                  f'{self.config.time_travel.T_sampling} sampling steps.',
+                  f'travel_length = {self.config.time_travel.travel_length},',
+                  f'travel_repeat = {self.config.time_travel.travel_repeat}.',
+                  f'Task: {self.args.deg}.'
+                 )
             
-    def take_grad(self, operators, x, x_hat, measurement):
-        for operator in operators:
-            x_hat = operator(x_hat)
-        
-        difference = x_hat - measurement
-        loss_value = torch.linalg.norm(difference)
-        gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
+            self.sample_rest(model)
 
-        return gradient
-    
-    def take_grad_ref(self, operators, x, x_hat, measurement, features=None):
-        for operator in operators:
-            x_hat = operator(x_hat)
-        
-        difference_pixel = x_hat - measurement
-        loss_value_pixel = torch.linalg.norm(difference_pixel)
-        x_freq, y_freq = self.get_high_pass(x_hat, measurement)
+    def _compute_metrics(self, img1, img2):
+        mse = torch.mean((img1 - img2) ** 2)
+        psnr = 10 * torch.log10(1 / mse)
+        ssim_score = ssim(img1, img2)
+        lpips_score = lpips(img1, img2, net_type='vgg', version='0.1')
 
-        loss_value_ref = 0.0
-        if features:
-            difference_ref = features['dense_features1'] - features['dense_features2']
-            loss_value_ref = torch.linalg.norm(difference_ref)
-
-        loss_value = loss_value_pixel + 0.05*loss_value_ref
-
-        gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
-
-        return gradient
-    
-    def take_grad_feedbackSR(self, operators, inverse_operators, x, x_hat, y):
-        for operator in operators:
-            x_hat_lq = operator(x_hat)
-        for operator in inverse_operators:
-            y_hq = operator(y)
-        
-        difference_lq = x_hat_lq - y
-        difference_hq = x_hat - y_hq
-
-        loss_value_lq, loss_value_hq = torch.linalg.norm(difference_lq), torch.linalg.norm(difference_hq)
-
-        loss_value = loss_value_lq - 0.1*loss_value_hq
-
-        gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
-
-        return gradient
-
-    def take_grad_rest(self, x, x_hat, y, y_rest):
-        difference_lq = x_hat - y
-        difference_hq = x_hat - y_rest
-        loss_value_lq = torch.linalg.norm(difference_lq)
-        loss_value_hq = torch.linalg.norm(difference_hq)
-
-        x_freq, y_freq = self.get_high_pass(x_hat, y)
-        loss_value_freq = torch.linalg.norm(x_freq - y_freq)
-        loss_value = loss_value_hq - 0.25*loss_value_lq #- 0.1*loss_value_freq - 0.4*loss_value_lq
-
-        gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
-
-        return gradient
-    
-    def take_grad_rest_clip(self, x, x_hat, y, y_rest, y_rest_clip, x_hat_clip):
-        #print(y_rest_clip.shape)
-        difference_lq = x_hat - y
-        difference_hq = x_hat - y_rest
-        difference_clip = x_hat_clip - y_rest_clip
-        loss_value_lq = torch.linalg.norm(difference_lq)
-        loss_value_hq = torch.linalg.norm(difference_hq)
-        loss_value_clip = torch.linalg.norm(difference_clip)
-
-        loss_value = loss_value_hq + 0.25*loss_value_clip #- 0.1*loss_value_lq
-
-        gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
-
-        return gradient
+        return psnr, ssim_score, lpips_score
 
     def _get_degradations_list(self, operators_list):
         operators = []
@@ -324,191 +269,7 @@ class Diffusion(object):
             inv_operators.append(A_inv)
         return operators, inv_operators
 
-    def get_high_pass(self, x, y, filter_rate=0.5):
-        x_freq = torch.fft.fftshift(torch.fft.fft(x))
-        y_freq = torch.fft.fftshift(torch.fft.fft(y))
-
-        h, w = x_freq.shape[2:]
-        cy, cx = int(h/2), int(w/2)
-        rh, rw = int(filter_rate * cy), int(filter_rate * cx)
-        x_freq[..., cy-rh:cy+rh, cx-rw:cx+rw] = 0
-        y_freq[..., cy-rh:cy+rh, cx-rw:cx+rw] = 0
-
-        x_ifft = torch.abs(torch.fft.ifft(torch.fft.ifftshift(x_freq))).clamp(-1.0, 1.0)
-        y_ifft = torch.abs(torch.fft.ifft(torch.fft.ifftshift(y_freq))).clamp(-1.0, 1.0)
-
-        y_ifft_save = inverse_data_transform(self.config, y_ifft)
-        tvu.save_image(
-          y_ifft_save, os.path.join(self.args.image_folder, f"high_y.png")
-        )
-
-        return x_ifft, y_ifft
-
-
-    def freedom(self, model):
-        args, config = self.args, self.config
-
-        _, test_dataset = get_dataset(args, config)
-
-        if args.subset_start >= 0 and args.subset_end > 0:
-            assert args.subset_end > args.subset_start
-            test_dataset = torch.utils.data.Subset(test_dataset, range(args.subset_start, args.subset_end))
-        else:
-            args.subset_start = 0
-            args.subset_end = len(test_dataset)
-
-        print(f'Dataset has size {len(test_dataset)}')
-
-        def seed_worker(worker_id):
-            worker_seed = args.seed % 2 ** 32
-            np.random.seed(worker_seed)
-            random.seed(worker_seed)
-
-        g = torch.Generator()
-        g.manual_seed(args.seed)
-        val_loader = data.DataLoader(
-            test_dataset,
-            batch_size=config.sampling.batch_size,
-            shuffle=True,
-            num_workers=config.data.num_workers,
-            worker_init_fn=seed_worker,
-            generator=g,
-        )
-        
-        print(f'Start from {args.subset_start}')
-        idx_init = args.subset_start
-        idx_so_far = args.subset_start
-        avg_psnr = 0.0
-        pbar = tqdm.tqdm(val_loader)
-        
-        scale = round(args.deg_scale)
-        self.scale = scale
-        print(args.start_operators, args.gradient_operators)
-        self.start_degradations, _ = self._get_degradations_list(args.start_operators)
-        self.gradient_degradations, inverse_operators = self._get_degradations_list(args.gradient_operators)
-
-        self.correction = args.correction_type
-        lr = 0.001
-        rate_m = 0.9
-        rate_v = 0.999
-
-        if self.correction == 'momentum':
-            self.momentum_corrector = MomentumCorrector(lr, rate_m)
-        elif self.correction == 'adam':
-            self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
-        
-        rate = 15
-
-        for x_orig, _ in pbar:
-            x_orig = x_orig.to(self.device)
-            x_orig = data_transform(self.config, x_orig)
-
-            y = x_orig
-            for operator in self.start_degradations:
-                y = operator(y)
-
-            if config.sampling.batch_size!=1:
-                raise ValueError("please change the config file to set batch size as 1")
-
-            os.makedirs(os.path.join(self.args.image_folder, "Apy"), exist_ok=True)
-            for i in range(len(y)):
-                tvu.save_image(
-                    inverse_data_transform(config, y[i]),
-                    os.path.join(self.args.image_folder, f"Apy/Apy_{idx_so_far + i}.png")
-                )
-                tvu.save_image(
-                    inverse_data_transform(config, x_orig[i]),
-                    os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
-                )
-                
-            # init x_T
-            x = torch.randn(
-                50,
-                config.data.channels,
-                config.data.image_size,
-                config.data.image_size,
-                device=self.device,
-            )
-            choice = np.random.randint(0, 10)
-            x = x[choice:choice + 1]
-
-            skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
-            n = x.size(0)
-            x0_preds = []
-            xs = [x]
-            
-            times = get_schedule_jump(config.time_travel.T_sampling, 
-                                            config.time_travel.travel_length, 
-                                            config.time_travel.travel_repeat,
-                                            )
-            time_pairs = list(zip(times[:-1], times[1:]))
-            
-            for i, j in tqdm.tqdm(time_pairs):
-                i, j = i*skip, j*skip
-                if j<0: j=-1 
-
-                if j < i: # normal sampling 
-                    t = (torch.ones(n) * i).to(x.device)
-                    next_t = (torch.ones(n) * j).to(x.device)
-                    at = compute_alpha(self.betas, t.long())
-                    at_next = compute_alpha(self.betas, next_t.long())
-                    xt = xs[-1].to(x.device)
-
-                    et = model(xt, t)
-
-                    if et.size(1) == 6:
-                        et = et[:, :3]
-
-                    xt_next = at_next.sqrt()*((xt - (1 - at).sqrt() * et) / at.sqrt()) + (1 - at_next).sqrt() * et
-                    xt = xt.requires_grad_()
-                    x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
-
-                    gradient = at.sqrt() * self.take_grad(self.gradient_degradations, xt, x0_t, y)
-                    if self.correction == 'momentum':
-                        gradient = self.momentum_corrector(gradient)
-                    elif self.correction == 'adam':
-                        gradient = self.adam_corrector(gradient, i)
-                    xt_next = xt_next - rate * gradient
-
-                    xt_next.detach_()
-                    x0_t = x0_t.detach_()
-                    xt = xt.detach()
-                    torch.cuda.empty_cache()
-                
-                    x0_preds.append(x0_t.to('cpu'))
-                    xs.append(xt_next.to('cpu'))    
-                
-                else: # time-travel back
-                    next_t = (torch.ones(n) * j).to(x.device)
-                    at_next = compute_alpha(self.betas, next_t.long())
-                    x0_t = x0_preds[-1].to(x.device)
-
-                    xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
-
-                    xs.append(xt_next.to('cpu'))
-
-            x = xs[-1]
-            
-            x = [inverse_data_transform(config, xi) for xi in x]
-
-            tvu.save_image(
-                x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
-            )
-            
-            orig = inverse_data_transform(config, x_orig[0])
-            mse = torch.mean((x[0].to(self.device) - orig) ** 2)
-            psnr = 10 * torch.log10(1 / mse)
-            avg_psnr += psnr
-
-            idx_so_far += y.shape[0]
-
-            pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
-
-        avg_psnr = avg_psnr / (idx_so_far - idx_init)
-        print("Total Average PSNR: %.2f" % avg_psnr)
-        print("Number of samples: %d" % (idx_so_far - idx_init))
-
-    def feedback(self, model):
+    def sample_rest(self, model):
         args, config = self.args, self.config
 
         _, test_dataset = get_dataset(args, config)
@@ -542,6 +303,10 @@ class Diffusion(object):
         idx_so_far = args.subset_start
         avg_psnr = 0.0
         avg_psnr_rest = 0.0
+        avg_ssim = 0.0
+        avg_ssim_rest = 0.0
+        avg_lpips = 0.0
+        avg_lpips_rest = 0.0
         #pbar = tqdm.tqdm(val_loader)
         
         scale = round(args.deg_scale)
@@ -557,214 +322,20 @@ class Diffusion(object):
         elif self.correction == 'adam':
             self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
         
-        rate = 20
-
-        net = Restormer()
-        net.load_state_dict(torch.load(args.model_path, map_location='cpu')['params'])
-        net.to('cuda')    
-
-        for d in test_dataset:
-            print(type(d))
-            #print(a)
-            H, W, C = d['HQ'].shape
-            d['HQ'] = d['HQ'].view(1, H, W, C)
-            d['LQ'] = d['LQ'].view(1, H, W, C)
-            x_orig = d['LQ']
-            x_orig = x_orig.to(self.device)
-            y = x_orig
-            
-            with torch.no_grad():
-                y_restored = net(y)
-
-            y = data_transform(self.config, y)
-            x_orig = data_transform(self.config, x_orig)
-            y_restored = data_transform(self.config, y_restored)
-
-            if config.sampling.batch_size!=1:
-                raise ValueError("please change the config file to set batch size as 1")
-
-            os.makedirs(os.path.join(self.args.image_folder, "Apy"), exist_ok=True)
-            for i in range(len(y)):
-                tvu.save_image(
-                    inverse_data_transform(config, y[i]),
-                    os.path.join(self.args.image_folder, f"Apy/Apy_{idx_so_far + i}.png")
-                )
-                tvu.save_image(
-                    inverse_data_transform(config, x_orig[i]),
-                    os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
-                )
-                
-            # init x_T
-            x = torch.randn(
-                50,
-                config.data.channels,
-                config.data.image_size,
-                config.data.image_size,
-                device=self.device,
-            )
-            choice = np.random.randint(0, 10)
-            x = x[choice:choice + 1]
-
-            skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
-            n = x.size(0)
-            x0_preds = []
-            xs = [x]
-            
-            times = get_schedule_jump(config.time_travel.T_sampling, 
-                                            config.time_travel.travel_length, 
-                                            config.time_travel.travel_repeat,
-                                            )
-            time_pairs = list(zip(times[:-1], times[1:]))
-            
-            for i, j in tqdm.tqdm(time_pairs):
-                i, j = i*skip, j*skip
-                if j<0: j=-1 
-
-                if j < i: # normal sampling 
-                    t = (torch.ones(n) * i).to(x.device)
-                    next_t = (torch.ones(n) * j).to(x.device)
-                    at = compute_alpha(self.betas, t.long())
-                    at_next = compute_alpha(self.betas, next_t.long())
-                    sigma_t = (1 - at_next**2).sqrt()
-                    xt = xs[-1].to(x.device)
-
-                    et = model(xt, t)
-
-                    if et.size(1) == 6:
-                        et = et[:, :3]
-
-                    #xt_next = at_next.sqrt()*((xt - (1 - at).sqrt() * et) / at.sqrt()) + (1 - at_next).sqrt() * et
-                    
-                    xt = xt.requires_grad_()
-                    x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
-
-                    gradient = self.take_grad_rest(xt, x0_t, y, y_restored)
-                    if self.correction == 'momentum':
-                        gradient = self.momentum_corrector(gradient)
-                    elif self.correction == 'adam':
-                        gradient = self.adam_corrector(gradient, i)
-                    
-                    c1 = at_next.sqrt() * (1 - at / at_next) / (1 - at)
-                    c2 = (at / at_next).sqrt() * (1 - at_next) / (1 - at)
-                    c3 = (1 - at_next) * (1 - at / at_next) / (1 - at)
-                    c3 = (c3.log() * 0.5).exp()
-                    x0_t = x0_t - rate * gradient
-
-                    xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
-
-                    #xt_next = xt_next - rate * gradient
-                    
-                    xt_next.detach_()
-                    x0_t = x0_t.detach_()
-                    xt = xt.detach()
-                    torch.cuda.empty_cache()
-                
-                    x0_preds.append(x0_t.to('cpu'))
-                    xs.append(xt_next.to('cpu'))    
-                
-                else: # time-travel back
-                    next_t = (torch.ones(n) * j).to(x.device)
-                    at_next = compute_alpha(self.betas, next_t.long())
-                    x0_t = x0_preds[-1].to(x.device)
-
-                    xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
-
-                    xs.append(xt_next.to('cpu'))
-
-            x = xs[-1]
-            
-            x = [inverse_data_transform(config, xi) for xi in x]
-            y_restored = inverse_data_transform(config, y_restored)
-            tvu.save_image(
-                x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
-            )
-            tvu.save_image(
-                y_restored, os.path.join(self.args.image_folder, f"restored_{idx_so_far + j}_{0}.png")
-            )
-            #orig = inverse_data_transform(config, x_orig[0])
-            mse = torch.mean((x[0] - d['HQ']) ** 2)
-            mse_rest = torch.mean((y_restored.detach().to('cpu') - d['HQ']) ** 2)
-            psnr = 10 * torch.log10(1 / mse)
-            psnr_rest = 10 * torch.log10(1 / mse_rest)
-            
-            avg_psnr += psnr
-            avg_psnr_rest += psnr_rest
-
-            idx_so_far += y.shape[0]
-
-            print(psnr)
-            print(psnr_rest)
-
-        avg_psnr = avg_psnr / (idx_so_far - idx_init)
-        avg_psnr_rest = avg_psnr_rest / (idx_so_far - idx_init)
-        print("Total Average PSNR: %.2f" % avg_psnr)
-        print("Total Average Restormer PSNR: %.2f" % avg_psnr_rest)
-        print("Number of samples: %d" % (idx_so_far - idx_init))
-
-    def feedback_clip(self, model):
-        args, config = self.args, self.config
-
-        _, test_dataset = get_dataset(args, config)
-
-        if args.subset_start >= 0 and args.subset_end > 0:
-            assert args.subset_end > args.subset_start
-            test_dataset = torch.utils.data.Subset(test_dataset, range(args.subset_start, args.subset_end))
-        else:
-            args.subset_start = 0
-            args.subset_end = len(test_dataset)
-
-        print(f'Dataset has size {len(test_dataset)}')
-
-        def seed_worker(worker_id):
-            worker_seed = args.seed % 2 ** 32
-            np.random.seed(worker_seed)
-            random.seed(worker_seed)
-
-        g = torch.Generator()
-        g.manual_seed(args.seed)
-        val_loader = data.DataLoader(
-            test_dataset,
-            batch_size=config.sampling.batch_size,
-            shuffle=True,
-            num_workers=config.data.num_workers,
-            worker_init_fn=seed_worker,
-        )
-        
-        print(f'Start from {args.subset_start}')
-        idx_init = args.subset_start
-        idx_so_far = args.subset_start
-        avg_psnr = 0.0
-        avg_psnr_rest = 0.0
-        #pbar = tqdm.tqdm(val_loader)
-        
-        scale = round(args.deg_scale)
-        self.scale = scale
-
-        self.correction = args.correction_type
-        lr = 1
-        rate_m = 0.9
-        rate_v = 0.999
-
-        if self.correction == 'momentum':
-            self.momentum_corrector = MomentumCorrector(lr, rate_m)
-        elif self.correction == 'adam':
-            self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
-        
-        rate = 20
+        rate = args.rate
 
         net = Restormer()
         net.load_state_dict(torch.load(args.model_path, map_location='cpu')['params'])
         net.to('cuda')
 
-        clipm, preprocess = clip.load('ViT-B/32', device=self.device)
-        transform = Compose([
-          Resize(224, BICUBIC),
-          Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
-        ])
+        if args.clip_guided:
+            clipm, preprocess = clip.load('ViT-B/32', device=self.device)
+            transform = Compose([
+            Resize(224, BICUBIC),
+            Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+            ])
 
         for d in test_dataset:
-            print(type(d))
-            #print(a)
             H, W, C = d['HQ'].shape
             d['HQ'] = d['HQ'].view(1, H, W, C)
             d['LQ'] = d['LQ'].view(1, H, W, C)
@@ -774,7 +345,8 @@ class Diffusion(object):
             
             with torch.no_grad():
                 y_restored = net(y)
-                y_rest_clip = clipm.encode_image(transform(y_restored))
+                if args.clip_guided:
+                    y_rest_clip = clipm.encode_image(transform(y_restored))
 
             y = data_transform(self.config, y)
             x_orig = data_transform(self.config, x_orig)
@@ -838,11 +410,12 @@ class Diffusion(object):
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
                     
-                    x0_t_clip = clipm.encode_image(transform(inverse_data_transform(config, x0_t)))
-                    #if i > 60:
-                    gradient = self.take_grad_rest_clip(xt, x0_t, y, y_restored, y_rest_clip, x0_t_clip)
-                    #else:
-                    #  gradient = self.take_grad_rest(xt, x0_t, y, y_restored)
+                    if args.clip_guided:
+                        x0_t_clip = clipm.encode_image(transform(inverse_data_transform(config, x0_t)))
+                        gradient = take_grad_rest_clip(xt, x0_t, y, y_restored, y_rest_clip, x0_t_clip)
+                    else:
+                        gradient = take_grad_rest(xt, x0_t, y, y_restored)
+                    
                     if self.correction == 'momentum':
                         gradient = self.momentum_corrector(gradient)
                     elif self.correction == 'adam':
@@ -852,9 +425,13 @@ class Diffusion(object):
                     c2 = (at / at_next).sqrt() * (1 - at_next) / (1 - at)
                     c3 = (1 - at_next) * (1 - at / at_next) / (1 - at)
                     c3 = (c3.log() * 0.5).exp()
-                    x0_t = x0_t - rate * gradient
-                    xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
-                    #xt_next = xt_next - rate * gradient
+                    
+                    if args.x0_grad:
+                        x0_t = x0_t - rate * gradient
+                        xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
+                    else:
+                        xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
+                        xt_next = xt_next - rate * gradient
                     
                     xt_next.detach_()
                     x0_t = x0_t.detach_()
@@ -875,6 +452,10 @@ class Diffusion(object):
 
             x = xs[-1]
             
+            x0_preds = x0_preds[::10]
+            x0_preds = [inverse_data_transform(config, xi) for xi in x0_preds]
+            x0_preds_grid = tvu.make_grid(x0_preds)
+            
             x = [inverse_data_transform(config, xi) for xi in x]
             y_restored = inverse_data_transform(config, y_restored)
             tvu.save_image(
@@ -883,28 +464,44 @@ class Diffusion(object):
             tvu.save_image(
                 y_restored, os.path.join(self.args.image_folder, f"restored_{idx_so_far + j}_{0}.png")
             )
+            tvu.save_image(
+                x0_preds_grid, os.path.join(self.args.image_folder, f"grid_{idx_so_far + j}_{0}.png")
+            )
             #orig = inverse_data_transform(config, x_orig[0])
-            mse = torch.mean((x[0] - d['HQ']) ** 2)
-            mse_rest = torch.mean((y_restored.detach().to('cpu') - d['HQ']) ** 2)
-            psnr = 10 * torch.log10(1 / mse)
-            psnr_rest = 10 * torch.log10(1 / mse_rest)
+
+            psnr, ssim_score, lpips_score = self._compute_metrics(x[0].to(self.device), d['HQ'].to(self.device))
+            psnr_rest, ssim_rest, lpips_rest = self._compute_metrics(y_restored, d['HQ'].to(self.device))
             
             avg_psnr += psnr
             avg_psnr_rest += psnr_rest
 
+            avg_ssim += ssim_score
+            avg_ssim_rest += ssim_rest
+
+            avg_lpips += lpips_score
+            avg_lpips_rest += lpips_rest
+
             idx_so_far += y.shape[0]
 
-            print(psnr)
-            print(psnr_rest)
+            print(psnr, ssim_score, lpips_score)
+            print(psnr_rest, ssim_rest, lpips_rest)
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
         avg_psnr_rest = avg_psnr_rest / (idx_so_far - idx_init)
+        avg_ssim = avg_ssim / (idx_so_far - idx_init)
+        avg_ssim_rest = avg_ssim_rest / (idx_so_far - idx_init)
+        avg_lpips = avg_lpips / (idx_so_far - idx_init)
+        avg_lpips_rest = avg_lpips_rest / (idx_so_far - idx_init)
+
         print("Total Average PSNR: %.2f" % avg_psnr)
         print("Total Average Restormer PSNR: %.2f" % avg_psnr_rest)
+        print("Total Average SSIM: %.2f" % avg_ssim)
+        print("Total Average Restormer SSIM: %.2f" % avg_ssim_rest)
+        print("Total Average LPIPS: %.2f" % avg_lpips)
+        print("Total Average Restormer LPIPS: %.2f" % avg_lpips_rest)
         print("Number of samples: %d" % (idx_so_far - idx_init))
 
-
-    def reference_guided(self, model):
+    def freedom_improved(self, model):
         args, config = self.args, self.config
 
         _, test_dataset = get_dataset(args, config)
@@ -938,6 +535,8 @@ class Diffusion(object):
         idx_init = args.subset_start
         idx_so_far = args.subset_start
         avg_psnr = 0.0
+        avg_ssim = 0.0
+        avg_lpips = 0.0
         #pbar = tqdm.tqdm(val_loader)
         
         scale = round(args.deg_scale)
@@ -955,12 +554,19 @@ class Diffusion(object):
         rate_m = 0.9
         rate_v = 0.999
 
+        if args.clip_guided:
+            clipm, preprocess = clip.load('ViT-B/32', device=self.device)
+            transform = Compose([
+            Resize(224, BICUBIC),
+            Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+            ])
+
         if self.correction == 'momentum':
             self.momentum_corrector = MomentumCorrector(lr, rate_m)
         elif self.correction == 'adam':
             self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
         
-        rate = 90
+        rate = args.rate
 
         for d in test_dataset:
             H, W, C = d['HQ'].shape
@@ -973,6 +579,9 @@ class Diffusion(object):
             y = x_orig
             for operator in self.start_degradations:
                 y = operator(y)
+
+            if args.clip_guided:
+                ref_clip = clipm.encode_image(transform(d['Ref']))
 
             if config.sampling.batch_size!=1:
                 raise ValueError("please change the config file to set batch size as 1")
@@ -1029,12 +638,15 @@ class Diffusion(object):
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
                     
-                    # features = None
-                    # if i <= 30:
-                    #   rate = 15
-                    #   features = feature_extractor(inverse_data_transform(config, x0_t), d['Ref'])
-
-                    gradient = self.take_grad_feedbackSR(self.gradient_degradations, inverse_operators, xt, x0_t, y)
+                    if args.clip_guided:
+                        features = {}
+                        features['dense_features1'] = clipm.encode_image(transform(inverse_data_transform(config, x0_t)))
+                        features['dense_features2'] = ref_clip
+                        gradient = take_grad_ref(self.gradient_degradations, xt, x0_t, y, features)
+                    elif args.only_L2:
+                        gradient = take_grad(self.gradient_degradations, xt, x0_t, y)
+                    else:
+                        gradient = take_grad_feedbackSR(self.gradient_degradations, inverse_operators, xt, x0_t, y)
                     
                     if self.correction == 'momentum':
                         gradient = self.momentum_corrector(gradient)
@@ -1068,23 +680,36 @@ class Diffusion(object):
                     xs.append(xt_next.to('cpu'))
 
             x = xs[-1]
+            x0_preds = x0_preds[::10]
+            x0_preds = [inverse_data_transform(config, xi) for xi in x0_preds]
+            x0_preds_grid = tvu.make_grid(x0_preds)
             
             x = [inverse_data_transform(config, xi) for xi in x]
 
             tvu.save_image(
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
             )
+            tvu.save_image(
+                x0_preds_grid, os.path.join(self.args.image_folder, f"grid_{idx_so_far + j}_{0}.png")
+            )
             
-            mse = torch.mean((x[0].detach().to('cpu') - d['HQ']) ** 2)
-            psnr = 10 * torch.log10(1 / mse)
+            psnr, ssim_score, lpips_score = self._compute_metrics(x[0].to(self.device), d['HQ'].to(self.device))
             avg_psnr += psnr
+            avg_ssim += ssim_score
+            avg_lpips += lpips_score
 
             idx_so_far += y.shape[0]
 
-            print("PSNR: %.2f" % (psnr))
+            print(psnr, ssim_score, lpips_score)
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
+        avg_ssim = avg_ssim / (idx_so_far - idx_init)
+        avg_lpips = avg_lpips / (idx_so_far - idx_init)
+
         print("Total Average PSNR: %.2f" % avg_psnr)
+        print("Total Average SSIM: %.2f" % avg_ssim)
+        print("Total Average LPIPS: %.2f" % avg_lpips)
+
         print("Number of samples: %d" % (idx_so_far - idx_init))
 
 

@@ -102,11 +102,20 @@ def parse_args_and_config():
         default=None
     )
     parser.add_argument(
-        "--rates",
+        "--rate",
         nargs="+",
         type=float,
-        default=[5]
+        default=20
     )
+    parser.add_argument(
+        '--clip_guided',
+        action='store_true'
+    )
+    parser.add_argument(
+        '--only_L2',
+        action='store_true'
+    )
+    
     parser.add_argument(
         '--model_path',
         type=str,
@@ -117,7 +126,7 @@ def parse_args_and_config():
         type=str,
         default=None
     )
-    
+
 
     args = parser.parse_args()
 
