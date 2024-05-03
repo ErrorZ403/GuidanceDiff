@@ -618,6 +618,7 @@ class Diffusion(object):
                                             config.time_travel.travel_repeat,
                                             )
             time_pairs = list(zip(times[:-1], times[1:]))
+            x0_vision = []
             
             for i, j in tqdm.tqdm(time_pairs):
                 i, j = i*skip, j*skip
@@ -668,7 +669,10 @@ class Diffusion(object):
                     torch.cuda.empty_cache()
                 
                     x0_preds.append(x0_t.to('cpu'))
-                    xs.append(xt_next.to('cpu'))   
+                    xs.append(xt_next.to('cpu'))
+
+                    if i % 100 == 0:
+                        x0_vision.append(x0_t[0])
 
                 else: # time-travel back
                     next_t = (torch.ones(n) * j).to(x.device)
@@ -680,17 +684,16 @@ class Diffusion(object):
                     xs.append(xt_next.to('cpu'))
 
             x = xs[-1]
-            x0_preds = x0_preds[::10]
-            x0_preds = [inverse_data_transform(config, xi) for xi in x0_preds]
-            x0_preds_grid = tvu.make_grid(x0_preds)
+            x0_vision = [inverse_data_transform(config, xi) for xi in x0_vision]
+            x0_vision = tvu.make_grid(x0_vision)
             
-            x = [inverse_data_transform(config, xi) for xi in x]
+            x = inverse_data_transform(config, x)
 
             tvu.save_image(
                 x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
             )
             tvu.save_image(
-                x0_preds_grid, os.path.join(self.args.image_folder, f"grid_{idx_so_far + j}_{0}.png")
+                x0_vision, os.path.join(self.args.image_folder, f"grid_{idx_so_far + j}_{0}.png")
             )
             
             psnr, ssim_score, lpips_score = self._compute_metrics(x[0].to(self.device), d['HQ'].to(self.device))
@@ -918,8 +921,7 @@ class Diffusion(object):
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
         print("Total Average PSNR: %.2f" % avg_psnr)
         print("Number of samples: %d" % (idx_so_far - idx_init))
-        
-        
+    
 
     def svd_based_ddnm_plus(self, model, cls_fn):
         args, config = self.args, self.config
