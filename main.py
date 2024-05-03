@@ -103,7 +103,6 @@ def parse_args_and_config():
     )
     parser.add_argument(
         "--rate",
-        nargs="+",
         type=float,
         default=20
     )
@@ -115,7 +114,10 @@ def parse_args_and_config():
         '--only_L2',
         action='store_true'
     )
-    
+    parser.add_argument(
+        '--x0_grad',
+        action='store_true'
+    )
     parser.add_argument(
         '--model_path',
         type=str,
