@@ -25,7 +25,7 @@ import random
 
 from torchvision.transforms import Compose, Resize, Normalize, InterpolationMode
 BICUBIC = InterpolationMode.BICUBIC
-#import clip
+import clip
 
 from scipy.linalg import orth
 from pytorch_ssim import ssim
@@ -624,7 +624,8 @@ class Diffusion(object):
                                             )
             time_pairs = list(zip(times[:-1], times[1:]))
             x0_vision = []
-            
+            features = None                    
+
             for i, j in tqdm.tqdm(time_pairs):
                 i, j = i*skip, j*skip
                 if j<0: j=-1 
@@ -635,7 +636,7 @@ class Diffusion(object):
                     at = compute_alpha(self.betas, t.long())
                     at_next = compute_alpha(self.betas, next_t.long())
                     xt = xs[-1].to(x.device)
-
+                    
                     et = model(xt, t)
 
                     if et.size(1) == 6:
@@ -645,9 +646,10 @@ class Diffusion(object):
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
                     
                     if args.clip_guided:
-                        features = {}
-                        features['dense_features1'] = clipm.encode_image(transform(inverse_data_transform(config, x0_t)))
-                        features['dense_features2'] = ref_clip
+                        if i > 600:
+                          features = {}
+                          features['dense_features1'] = clipm.encode_image(transform(inverse_data_transform(config, x0_t)))
+                          features['dense_features2'] = ref_clip
                         gradient = take_grad_ref(self.gradient_degradations, xt, x0_t, y, features)
                     elif args.only_L2:
                         gradient = take_grad(self.gradient_degradations, xt, x0_t, y)
@@ -665,7 +667,8 @@ class Diffusion(object):
                     c3 = (c3.log() * 0.5).exp()
 
                     if args.x0_grad:
-                        x0_t = x0_t - rate * gradient
+                        x0_t_improved = x0_t - rate * gradient
+                        x0_t = 0.1 * x0_t + 0.9 * x0_t_improved
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
                     else:
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
@@ -1047,6 +1050,7 @@ class Diffusion(object):
         avg_lpips = 0.0
         #pbar = tqdm.tqdm(val_loader)
         for x_orig, classes in val_loader:
+            classes = None
             x_orig = x_orig.to(self.device)
             x_orig_transformed = data_transform(self.config, x_orig)
 
