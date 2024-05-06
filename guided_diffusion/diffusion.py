@@ -29,7 +29,9 @@ BICUBIC = InterpolationMode.BICUBIC
 
 from scipy.linalg import orth
 from pytorch_ssim import ssim
-from lpips_pytorch import lpips
+from lpips import LPIPS
+
+lpips_loss = LPIPS(net='vgg').to('cuda')
 
 
 def get_gaussian_noisy_img(img, noise_level):
@@ -240,7 +242,7 @@ class Diffusion(object):
         mse = torch.mean((img1 - img2) ** 2)
         psnr = 10 * torch.log10(1 / mse)
         ssim_score = ssim(img1, img2)
-        lpips_score = lpips(img1, img2, net_type='vgg', version='0.1')
+        lpips_score = lpips_loss(2 * img1 - 1, 2 * img2 - 1)
 
         return psnr, ssim_score, lpips_score
 
@@ -699,7 +701,7 @@ class Diffusion(object):
                 x0_vision, os.path.join(self.args.image_folder, f"grid_{idx_so_far + j}_{0}.png")
             )
             
-            psnr, ssim_score, lpips_score = self._compute_metrics(x[0].to(self.device), d['HQ'].to(self.device))
+            psnr, ssim_score, lpips_score = self._compute_metrics(x.to(self.device), d['HQ'].to(self.device))
             avg_psnr += psnr
             avg_ssim += ssim_score
             avg_lpips += lpips_score
@@ -1038,12 +1040,14 @@ class Diffusion(object):
         idx_init = args.subset_start
         idx_so_far = args.subset_start
         avg_psnr = 0.0
-        pbar = tqdm.tqdm(val_loader)
-        for x_orig, classes in pbar:
+        avg_ssim = 0.0
+        avg_lpips = 0.0
+        #pbar = tqdm.tqdm(val_loader)
+        for x_orig, classes in val_loader:
             x_orig = x_orig.to(self.device)
-            x_orig = data_transform(self.config, x_orig)
+            x_orig_transformed = data_transform(self.config, x_orig)
 
-            y = A_funcs.A(x_orig)
+            y = A_funcs.A(x_orig_transformed)
             
             b, hwc = y.size()
             if 'color' in deg:
@@ -1080,7 +1084,7 @@ class Diffusion(object):
                     os.path.join(self.args.image_folder, f"Apy/Apy_{idx_so_far + i}.png")
                 )
                 tvu.save_image(
-                    inverse_data_transform(config, x_orig[i]),
+                    inverse_data_transform(config, x_orig_transformed[i]),
                     os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
                 )
 
@@ -1100,25 +1104,28 @@ class Diffusion(object):
                     x, _ = ddnm_plus_diffusion(x, model, self.betas, self.args.eta, A_funcs, y, sigma_y, cls_fn=cls_fn, classes=classes, config=config)
 
             x = [inverse_data_transform(config, xi) for xi in x]
+            tvu.save_image(
+              x[0], os.path.join(self.args.image_folder, f"{idx_so_far}_{0}.png")
+            )
 
-
-            for j in range(x[0].size(0)):
-                tvu.save_image(
-                    x[0][j], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
-                )
-                orig = inverse_data_transform(config, x_orig[j])
-                mse = torch.mean((x[0][j].to(self.device) - orig) ** 2)
-                psnr = 10 * torch.log10(1 / mse)
-                avg_psnr += psnr
+            psnr, ssim_score, lpips_score = self._compute_metrics(x[0].to(self.device), x_orig.to(self.device))
+            avg_psnr += psnr
+            avg_ssim += ssim_score
+            avg_lpips += lpips_score
 
             idx_so_far += y.shape[0]
 
-            pbar.set_description("PSNR: %.2f" % (avg_psnr / (idx_so_far - idx_init)))
+            print(psnr, ssim_score, lpips_score)
 
         avg_psnr = avg_psnr / (idx_so_far - idx_init)
-        print("Total Average PSNR: %.2f" % avg_psnr)
-        print("Number of samples: %d" % (idx_so_far - idx_init))
+        avg_ssim = avg_ssim / (idx_so_far - idx_init)
+        avg_lpips = avg_lpips / (idx_so_far - idx_init)
 
+        print("Total Average PSNR: %.2f" % avg_psnr)
+        print("Total Average SSIM: %.2f" % avg_ssim)
+        print("Total Average LPIPS: %.2f" % avg_lpips)
+
+        print("Number of samples: %d" % (idx_so_far - idx_init))
 # Code form RePaint   
 def get_schedule_jump(T_sampling, travel_length, travel_repeat):
     jumps = {}
