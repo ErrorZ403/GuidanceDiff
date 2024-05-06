@@ -381,6 +381,7 @@ class Diffusion(object):
             n = x.size(0)
             x0_preds = []
             xs = [x]
+            x0_vision = []
             
             times = get_schedule_jump(config.time_travel.T_sampling, 
                                             config.time_travel.travel_length, 
@@ -439,7 +440,10 @@ class Diffusion(object):
                     torch.cuda.empty_cache()
                 
                     x0_preds.append(x0_t.to('cpu'))
-                    xs.append(xt_next.to('cpu'))    
+                    xs.append(xt_next.to('cpu'))
+
+                    if i % 100 == 0:
+                        x0_vision.append(x0_t.to('cpu')) 
                 
                 else: # time-travel back
                     next_t = (torch.ones(n) * j).to(x.device)
@@ -452,9 +456,8 @@ class Diffusion(object):
 
             x = xs[-1]
             
-            x0_preds = x0_preds[::10]
-            x0_preds = [inverse_data_transform(config, xi) for xi in x0_preds]
-            x0_preds_grid = tvu.make_grid(x0_preds)
+            x0_vision = [inverse_data_transform(config, xi) for xi in x0_vision]
+            x0_vision = tvu.make_grid(x0_vision)
             
             x = [inverse_data_transform(config, xi) for xi in x]
             y_restored = inverse_data_transform(config, y_restored)
@@ -465,7 +468,7 @@ class Diffusion(object):
                 y_restored, os.path.join(self.args.image_folder, f"restored_{idx_so_far + j}_{0}.png")
             )
             tvu.save_image(
-                x0_preds_grid, os.path.join(self.args.image_folder, f"grid_{idx_so_far + j}_{0}.png")
+                x0_vision, os.path.join(self.args.image_folder, f"grid_{idx_so_far + j}_{0}.png")
             )
             #orig = inverse_data_transform(config, x_orig[0])
 
