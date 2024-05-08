@@ -524,17 +524,6 @@ class Diffusion(object):
             worker_seed = args.seed % 2 ** 32
             np.random.seed(worker_seed)
             random.seed(worker_seed)
-
-        g = torch.Generator()
-        g.manual_seed(args.seed)
-        val_loader = data.DataLoader(
-            test_dataset,
-            batch_size=config.sampling.batch_size,
-            shuffle=True,
-            num_workers=config.data.num_workers,
-            worker_init_fn=seed_worker,
-            generator=g,
-        )
         
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
@@ -667,8 +656,7 @@ class Diffusion(object):
                     c3 = (c3.log() * 0.5).exp()
 
                     if args.x0_grad:
-                        x0_t_improved = x0_t - rate * gradient
-                        x0_t = 0.1 * x0_t + 0.9 * x0_t_improved
+                        x0_t = x0_t - rate * gradient
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
                     else:
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
