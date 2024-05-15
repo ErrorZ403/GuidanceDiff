@@ -538,6 +538,11 @@ class Diffusion(object):
             args.subset_end = len(test_dataset)
 
         print(f'Dataset has size {len(test_dataset)}')
+
+        def seed_worker(worker_id):
+            worker_seed = args.seed % 2 ** 32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
         
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
@@ -545,12 +550,17 @@ class Diffusion(object):
         avg_psnr = 0.0
         avg_ssim = 0.0
         avg_lpips = 0.0
-
+        #pbar = tqdm.tqdm(val_loader)
+        
         scale = round(args.deg_scale)
         self.scale = scale
         print(args.start_operators, args.gradient_operators)
         self.start_degradations, _ = self._get_degradations_list(args.start_operators)
         self.gradient_degradations, inverse_operators = self._get_degradations_list(args.gradient_operators)
+
+        #feature_extractor = VGG()
+        #feature_extractor.load_state_dict(torch.load(args.ref_feats_path, map_location='cpu'))
+        #feature_extractor.to(self.device)
 
         self.correction = args.correction_type
         lr = 0.001
@@ -580,9 +590,10 @@ class Diffusion(object):
             sample_fn = partial(sampler.p_sample_loop, model=model)
 
         for d in test_dataset:
-            H, W, C = d['HQ'].shape
-            d['HQ'] = d['HQ'].view(1, H, W, C)
-            d['Ref'] = d['Ref'].view(1, H, W, C).to(self.device)
+            C, H, W = d['HQ'].shape
+            print(H, W, C)
+            d['HQ'] = d['HQ'].view(1, C, H, W)
+            d['Ref'] = d['Ref'].view(1, C, H, W).to(self.device)
             x_orig = d['HQ']
             x_orig = x_orig.to(self.device)
             x_orig = data_transform(self.config, x_orig)
@@ -590,10 +601,12 @@ class Diffusion(object):
             y = x_orig
             for operator in self.start_degradations:
                 y = operator(y)
-            
-            y_up = y
+            c, h, w = y.shape[1:]
+            y_up = y.view(1, c*h*w)
             for operator in inverse_operators:
                 y_up = operator.A_pinv(y_up)
+            y_up = y_up.view(1, C, H, W)
+            print(y_up.shape)
 
             if args.clip_guided:
                 ref_clip = clipm.encode_image(transform(d['Ref']))
@@ -613,7 +626,7 @@ class Diffusion(object):
                 )
                 tvu.save_image(
                     inverse_data_transform(config, y_up[i]),
-                    os.path.join(self.args.image_folder, f"Ainvy_{idx_so_far + i}.png")
+                    os.path.join(self.args.image_folder, f"Apy/Ainvy_{idx_so_far + i}.png")
                 )
                 
             # init x_T
@@ -638,6 +651,7 @@ class Diffusion(object):
                                             )
             time_pairs = list(zip(times[:-1], times[1:]))
             x0_vision = []
+            x0_fused = []
             features = None                    
 
             for i, j in tqdm.tqdm(time_pairs):
@@ -651,7 +665,8 @@ class Diffusion(object):
                     at_next = compute_alpha(self.betas, next_t.long())
                     xt = xs[-1].to(x.device)
                     
-                    et = model(xt, t)
+                    with torch.no_grad():
+                        et = model(xt, t)
 
                     if et.size(1) == 6:
                         et = et[:, :3]
@@ -682,11 +697,15 @@ class Diffusion(object):
 
                     if args.x0_grad:
                         x0_t = x0_t - rate * gradient
-                        if args.sampler_path and i % 100 == 0:
+                        if args.sampler_path and i < 1000 and i >= 800 and i % 100 == 0:
                             x_start = torch.randn(x0_t.shape, device=self.device)
-                            x0_t = sample_fn(
-                                x_start=x_start, record=False, I = y_up, V = x0_t, save_root = None, img_index = None, lamb = 0.5, rho = 0.001
-                            )
+                            with torch.no_grad():
+                                x0_t_fused = sample_fn(
+                                    x_start=x_start, record=False, I = y_up, V = x0_t, save_root = None, img_index = None, lamb = 0.5, rho = 0.001
+                                )
+                                x0_fused.append(x0_t_fused[0].detach())
+                                x0_t = x0_t_fused
+
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
                     else:
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)

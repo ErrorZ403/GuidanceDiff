@@ -1,13 +1,12 @@
 import math
 import os
 from functools import partial
+from cv2.gapi.streaming import timestamp
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from tqdm.auto import tqdm
-
-
-from .posterior_mean_variance import get_mean_processor, get_var_processor
+import tqdm
+from fusion_diffusion.posterior_mean_variance import get_mean_processor, get_var_processor
 
 from .EM_onestep import EM_Initial,EM_onestep
 from skimage.io import imsave
@@ -182,20 +181,19 @@ class GaussianDiffusion:
         """ 
         img = x_start
         device = x_start.device
-
-        pbar = tqdm(list(range(self.num_timesteps))[::-1])
-        for idx in pbar:
+        timesteps = list(range(self.num_timesteps))[::-1]
+        pbar = partial(tqdm.tqdm, position=0)
+        for idx in pbar(timesteps):
             time = torch.tensor([idx] * img.shape[0], device=device)
-            
-            img = img 
-
+            img = img
            
             HP = EM_Initial(I) if time == torch.tensor([self.num_timesteps-1], device=device) else HP
            
             out, HP = self.p_sample(x=img, t=time, model=model, bfHP = HP, infrared = I, visible = V, lamb=lamb,rho=rho)
 
-
             img = out['sample'].detach_()
+            
+            torch.cuda.empty_cache()
            
             if record:
                 if idx % 1 == 0:
