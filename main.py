@@ -128,6 +128,11 @@ def parse_args_and_config():
         type=str,
         default=None
     )
+    parser.add_argument(
+        '--sampler_path',
+        type=str,
+        default=None
+    )
 
 
     args = parser.parse_args()

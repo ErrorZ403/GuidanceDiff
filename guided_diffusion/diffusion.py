@@ -1,3 +1,4 @@
+from functools import partial
 import os
 import logging
 import time
@@ -7,10 +8,12 @@ import numpy as np
 import tqdm
 import torch
 import torch.utils.data as data
+import yaml
 
 from datasets import get_dataset, data_transform, inverse_data_transform
 from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
+from fusion_diffusion.gaussian_diffusion import create_sampler
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
 
 from guided_diffusion.gradient_functions import *
@@ -252,7 +255,23 @@ class Diffusion(object):
         for operator in operators_list:
             if operator == 'bicubic':
                 A = lambda z: imresize(z, scale=1/self.scale)
-                A_inv = lambda z: imresize(z, scale=self.scale)
+                factor = int(self.scale)
+                from functions.svd_operators import SRConv
+                def bicubic_kernel(x, a=-0.5):
+                    if abs(x) <= 1:
+                        return (a + 2) * abs(x) ** 3 - (a + 3) * abs(x) ** 2 + 1
+                    elif 1 < abs(x) and abs(x) < 2:
+                        return a * abs(x) ** 3 - 5 * a * abs(x) ** 2 + 8 * a * abs(x) - 4 * a
+                    else:
+                        return 0
+                k = np.zeros((factor * 4))
+                for i in range(factor * 4):
+                    x = (1 / factor) * (i - np.floor(factor * 4 / 2) + 0.5)
+                    k[i] = bicubic_kernel(x)
+                k = k / np.sum(k)
+                kernel = torch.from_numpy(k).float().to(self.device)
+                A_inv = SRConv(kernel / kernel.sum(), \
+                                self.config.data.channels, self.config.data.image_size, self.device, stride=factor)
             elif operator == 'nearest':
                 A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest').clamp_(-1.0, 1.0)
             elif operator == 'linear':
@@ -562,6 +581,14 @@ class Diffusion(object):
         
         rate = args.rate
 
+        if args.sampler_path:
+            with open(args.sampler_path) as f:
+                sampler_config = yaml.load(f, Loader=yaml.FullLoader)
+            sampler = create_sampler(
+                **sampler_config
+            )
+            sample_fn = partial(sampler.p_sample_loop, model=model)
+
         for d in test_dataset:
             H, W, C = d['HQ'].shape
             d['HQ'] = d['HQ'].view(1, H, W, C)
@@ -573,6 +600,10 @@ class Diffusion(object):
             y = x_orig
             for operator in self.start_degradations:
                 y = operator(y)
+            
+            y_up = y
+            for operator in inverse_operators:
+                y_up = operator(y_up)
 
             if args.clip_guided:
                 ref_clip = clipm.encode_image(transform(d['Ref']))
@@ -657,6 +688,11 @@ class Diffusion(object):
 
                     if args.x0_grad:
                         x0_t = x0_t - rate * gradient
+                        if args.sampler_path and i % 100 == 0:
+                            x_start = torch.randn(x0_t.shape, device=self.device)
+                            x0_t = sample_fn(
+                                x_start=x_start, record=False, I = y_up, V = x0_t, save_root = None, img_index = None, lamb = 0.5, rho = 0.001
+                            )
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
                     else:
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
