@@ -538,11 +538,6 @@ class Diffusion(object):
             args.subset_end = len(test_dataset)
 
         print(f'Dataset has size {len(test_dataset)}')
-
-        def seed_worker(worker_id):
-            worker_seed = args.seed % 2 ** 32
-            np.random.seed(worker_seed)
-            random.seed(worker_seed)
         
         print(f'Start from {args.subset_start}')
         idx_init = args.subset_start
@@ -550,17 +545,12 @@ class Diffusion(object):
         avg_psnr = 0.0
         avg_ssim = 0.0
         avg_lpips = 0.0
-        #pbar = tqdm.tqdm(val_loader)
-        
+
         scale = round(args.deg_scale)
         self.scale = scale
         print(args.start_operators, args.gradient_operators)
         self.start_degradations, _ = self._get_degradations_list(args.start_operators)
         self.gradient_degradations, inverse_operators = self._get_degradations_list(args.gradient_operators)
-
-        #feature_extractor = VGG()
-        #feature_extractor.load_state_dict(torch.load(args.ref_feats_path, map_location='cpu'))
-        #feature_extractor.to(self.device)
 
         self.correction = args.correction_type
         lr = 0.001
@@ -603,7 +593,7 @@ class Diffusion(object):
             
             y_up = y
             for operator in inverse_operators:
-                y_up = operator(y_up)
+                y_up = operator.A_pinv(y_up)
 
             if args.clip_guided:
                 ref_clip = clipm.encode_image(transform(d['Ref']))
@@ -620,6 +610,10 @@ class Diffusion(object):
                 tvu.save_image(
                     inverse_data_transform(config, x_orig[i]),
                     os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
+                )
+                tvu.save_image(
+                    inverse_data_transform(config, y_up[i]),
+                    os.path.join(self.args.image_folder, f"Ainvy_{idx_so_far + i}.png")
                 )
                 
             # init x_T
