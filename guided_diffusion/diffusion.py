@@ -15,7 +15,7 @@ from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
 from fusion_diffusion.gaussian_diffusion import create_sampler
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
-from utils import CG
+from guided_diffusion.utils import CG
 
 from guided_diffusion.gradient_functions import *
 from guided_diffusion.rest_models.wgms import UNet as WGMS
@@ -806,10 +806,6 @@ class Diffusion(object):
         self.start_degradations, _ = self._get_degradations_list(args.start_operators)
         self.gradient_degradations, inverse_operators = self._get_degradations_list(args.gradient_operators)
 
-        #feature_extractor = VGG()
-        #feature_extractor.load_state_dict(torch.load(args.ref_feats_path, map_location='cpu'))
-        #feature_extractor.to(self.device)
-
         self.correction = args.correction_type
         lr = 0.001
         rate_m = 0.9
@@ -838,7 +834,10 @@ class Diffusion(object):
             sample_fn = partial(sampler.p_sample_loop, model=model)
         
         def Acg(x):
-            return inverse_operators[0].A_pinv(self.gradient_degradations[0](x))
+            x_hat = self.gradient_degradations[0](x)
+            A = lambda z: imresize(z, scale=self.scale)
+            x_hat = A(x_hat)
+            return x_hat
         Acg_fn = Acg
         
         for d in test_dataset:
@@ -925,8 +924,8 @@ class Diffusion(object):
                     xt = xt.requires_grad_()
                     x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
                     
-                    c1 = (1 - at_next).sqrt() * eta
-                    c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
+                    c1 = (1 - at_next).sqrt() * 0.85
+                    c2 = (1 - at_next).sqrt() * ((1 - 0.85 ** 2) ** 0.5)
 
                     if args.x0_grad:
                         x0_t = CG(Acg_fn, y_up, x0_t, n_inner = 5)
