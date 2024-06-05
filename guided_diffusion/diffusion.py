@@ -15,6 +15,7 @@ from functions.ckpt_util import get_ckpt_path, download
 from functions.svd_ddnm import ddnm_diffusion, ddnm_plus_diffusion
 from fusion_diffusion.gaussian_diffusion import create_sampler
 from guided_diffusion.correctors import AdamCorrector, MomentumCorrector
+from utils import CG
 
 from guided_diffusion.gradient_functions import *
 from guided_diffusion.rest_models.wgms import UNet as WGMS
@@ -231,6 +232,15 @@ class Diffusion(object):
                  )
             
             self.freedom_improved(model)
+        elif algorithm == 'dds':
+            print('Run DDS.',
+                  f'{self.config.time_travel.T_sampling} sampling steps.',
+                  f'travel_length = {self.config.time_travel.travel_length},',
+                  f'travel_repeat = {self.config.time_travel.travel_repeat}.',
+                  f'Task: {self.args.deg}.'
+                 )
+            
+            self.dds(model)
         else:
             print('Run Restoration Guidance.',
                   f'{self.config.time_travel.T_sampling} sampling steps.',
@@ -710,6 +720,228 @@ class Diffusion(object):
                     else:
                         xt_next = c1 * x0_t + c2 * xt + c3 * torch.randn_like(x0_t)
                         xt_next = xt_next - rate * gradient
+
+                    xt_next.detach_()
+                    x0_t = x0_t.detach_()
+                    xt = xt.detach()
+                    torch.cuda.empty_cache()
+                
+                    x0_preds.append(x0_t.to('cpu'))
+                    xs.append(xt_next.to('cpu'))
+
+                    if i % 100 == 0:
+                        x0_vision.append(x0_t[0])
+
+                else: # time-travel back
+                    next_t = (torch.ones(n) * j).to(x.device)
+                    at_next = compute_alpha(self.betas, next_t.long())
+                    x0_t = x0_preds[-1].to(x.device)
+
+                    xt_next = at_next.sqrt() * x0_t + torch.randn_like(x0_t) * (1 - at_next).sqrt()
+
+                    xs.append(xt_next.to('cpu'))
+
+            x = xs[-1]
+            x0_vision = [inverse_data_transform(config, xi) for xi in x0_vision]
+            x0_vision = tvu.make_grid(x0_vision)
+            
+            x = inverse_data_transform(config, x)
+
+            tvu.save_image(
+                x[0], os.path.join(self.args.image_folder, f"{idx_so_far + j}_{0}.png")
+            )
+            tvu.save_image(
+                x0_vision, os.path.join(self.args.image_folder, f"grid_{idx_so_far + j}_{0}.png")
+            )
+            
+            psnr, ssim_score, lpips_score = self._compute_metrics(x.to(self.device), d['HQ'].to(self.device))
+            avg_psnr += psnr
+            avg_ssim += ssim_score
+            avg_lpips += lpips_score
+
+            idx_so_far += y.shape[0]
+
+            print(psnr, ssim_score, lpips_score)
+
+        avg_psnr = avg_psnr / (idx_so_far - idx_init)
+        avg_ssim = avg_ssim / (idx_so_far - idx_init)
+        avg_lpips = avg_lpips / (idx_so_far - idx_init)
+
+        print("Total Average PSNR: %.2f" % avg_psnr)
+        print("Total Average SSIM: %.2f" % avg_ssim)
+        print("Total Average LPIPS: %.2f" % avg_lpips)
+
+        print("Number of samples: %d" % (idx_so_far - idx_init))
+
+    def dds(self, model):
+        args, config = self.args, self.config
+
+        _, test_dataset = get_dataset(args, config)
+
+        if args.subset_start >= 0 and args.subset_end > 0:
+            assert args.subset_end > args.subset_start
+            test_dataset = torch.utils.data.Subset(test_dataset, range(args.subset_start, args.subset_end))
+        else:
+            args.subset_start = 0
+            args.subset_end = len(test_dataset)
+
+        print(f'Dataset has size {len(test_dataset)}')
+
+        def seed_worker(worker_id):
+            worker_seed = args.seed % 2 ** 32
+            np.random.seed(worker_seed)
+            random.seed(worker_seed)
+        
+        print(f'Start from {args.subset_start}')
+        idx_init = args.subset_start
+        idx_so_far = args.subset_start
+        avg_psnr = 0.0
+        avg_ssim = 0.0
+        avg_lpips = 0.0
+        #pbar = tqdm.tqdm(val_loader)
+        
+        scale = round(args.deg_scale)
+        self.scale = scale
+        print(args.start_operators, args.gradient_operators)
+        self.start_degradations, _ = self._get_degradations_list(args.start_operators)
+        self.gradient_degradations, inverse_operators = self._get_degradations_list(args.gradient_operators)
+
+        #feature_extractor = VGG()
+        #feature_extractor.load_state_dict(torch.load(args.ref_feats_path, map_location='cpu'))
+        #feature_extractor.to(self.device)
+
+        self.correction = args.correction_type
+        lr = 0.001
+        rate_m = 0.9
+        rate_v = 0.999
+
+        if args.clip_guided:
+            clipm, preprocess = clip.load('ViT-B/32', device=self.device)
+            transform = Compose([
+            Resize(224, BICUBIC),
+            Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+            ])
+
+        if self.correction == 'momentum':
+            self.momentum_corrector = MomentumCorrector(lr, rate_m)
+        elif self.correction == 'adam':
+            self.adam_corrector = AdamCorrector(lr, rate_m, rate_v, config.diffusion.num_diffusion_timesteps)
+        
+        rate = args.rate
+
+        if args.sampler_path:
+            with open(args.sampler_path) as f:
+                sampler_config = yaml.load(f, Loader=yaml.FullLoader)
+            sampler = create_sampler(
+                **sampler_config
+            )
+            sample_fn = partial(sampler.p_sample_loop, model=model)
+        
+        def Acg(x):
+            return inverse_operators[0].A_pinv(self.gradient_degradations[0](x))
+        Acg_fn = Acg
+        
+        for d in test_dataset:
+            C, H, W = d['HQ'].shape
+            print(H, W, C)
+            d['HQ'] = d['HQ'].view(1, C, H, W)
+            d['Ref'] = d['Ref'].view(1, C, H, W).to(self.device)
+            x_orig = d['HQ']
+            x_orig = x_orig.to(self.device)
+            x_orig = data_transform(self.config, x_orig)
+
+            y = x_orig
+            for operator in self.start_degradations:
+                y = operator(y)
+            c, h, w = y.shape[1:]
+            y_up = y.view(1, c*h*w)
+            for operator in inverse_operators:
+                y_up = operator.A_pinv(y_up)
+            y_up = y_up.view(1, C, H, W)
+            print(y_up.shape)
+
+            if args.clip_guided:
+                ref_clip = clipm.encode_image(transform(d['Ref']))
+
+            if config.sampling.batch_size!=1:
+                raise ValueError("please change the config file to set batch size as 1")
+
+            os.makedirs(os.path.join(self.args.image_folder, "Apy"), exist_ok=True)
+            for i in range(len(y)):
+                tvu.save_image(
+                    inverse_data_transform(config, y[i]),
+                    os.path.join(self.args.image_folder, f"Apy/Apy_{idx_so_far + i}.png")
+                )
+                tvu.save_image(
+                    inverse_data_transform(config, x_orig[i]),
+                    os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
+                )
+                tvu.save_image(
+                    inverse_data_transform(config, y_up[i]),
+                    os.path.join(self.args.image_folder, f"Apy/Ainvy_{idx_so_far + i}.png")
+                )
+                
+            # init x_T
+            x = torch.randn(
+                50,
+                config.data.channels,
+                config.data.image_size,
+                config.data.image_size,
+                device=self.device,
+            )
+            choice = np.random.randint(0, 10)
+            x = x[choice:choice + 1]
+
+            skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
+            n = x.size(0)
+            x0_preds = []
+            xs = [x]
+            
+            times = get_schedule_jump(config.time_travel.T_sampling, 
+                                            config.time_travel.travel_length, 
+                                            config.time_travel.travel_repeat,
+                                            )
+            time_pairs = list(zip(times[:-1], times[1:]))
+            x0_vision = []
+            x0_fused = []                  
+
+            for i, j in tqdm.tqdm(time_pairs):
+                i, j = i*skip, j*skip
+                if j<0: j=-1 
+
+                if j < i: # normal sampling 
+                    t = (torch.ones(n) * i).to(x.device)
+                    next_t = (torch.ones(n) * j).to(x.device)
+                    at = compute_alpha(self.betas, t.long())
+                    at_next = compute_alpha(self.betas, next_t.long())
+                    xt = xs[-1].to(x.device)
+                    
+                    with torch.no_grad():
+                        et = model(xt, t)
+
+                    if et.size(1) == 6:
+                        et = et[:, :3]
+
+                    xt = xt.requires_grad_()
+                    x0_t = (xt - (1 - at).sqrt()*et) / at.sqrt()
+                    
+                    c1 = (1 - at_next).sqrt() * eta
+                    c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
+
+                    if args.x0_grad:
+                        x0_t = CG(Acg_fn, y_up, x0_t, n_inner = 5)
+                        if args.sampler_path and i < 1000 and i >= 800 and i % 100 == 0:
+                            x_start = torch.randn(x0_t.shape, device=self.device)
+                            with torch.no_grad():
+                                x0_t_fused = sample_fn(
+                                    x_start=x_start, record=False, I = y_up, V = x0_t, save_root = None, img_index = None, lamb = 0.5, rho = 0.001
+                                )
+                                x0_fused.append(x0_t_fused[0].detach())
+                                x0_t = x0_t_fused
+                        if j != 0:
+                            xt_next = at_next.sqrt() * x0_t + c1 * torch.randn_like(x0_t) + c2 * et
+                        else:
+                            xt_next = x0_t
 
                     xt_next.detach_()
                     x0_t = x0_t.detach_()
