@@ -132,6 +132,10 @@ def parse_args_and_config():
         '--sampler_path',
         type=str,
         default=None
+    )    
+    parser.add_argument(
+        '--from_noise',
+        action='store_true'
     )
 
 

@@ -85,7 +85,7 @@ class A_functions:
         
 #         temp[:, :singulars.shape[0]] = temp[:, :singulars.shape[0]] / singulars
         temp[:, :singulars.shape[0]] = temp[:, :singulars.shape[0]] * factors
-        return self.V(self.add_zeros(temp))
+        return self._reshape(self.V(self.add_zeros(temp)))
     
     def A_pinv_eta(self, vec, eta):
         """

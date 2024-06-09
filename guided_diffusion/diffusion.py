@@ -262,6 +262,7 @@ class Diffusion(object):
     def _get_degradations_list(self, operators_list):
         operators = []
         inv_operators = []
+        transposed_operators = []
         for operator in operators_list:
             if operator == 'bicubic':
               factor = int(self.scale)
@@ -315,8 +316,9 @@ class Diffusion(object):
             else:
                 raise ValueError(f'Operator {operator} have not been implemented yet')
             operators.append(A_funcs.A)
-            inv_operators.append(A_funcs.At)
-        return operators, inv_operators
+            transposed_operators.append(A_funcs.At)
+            inv_operators.append(A_funcs.A_pinv)
+        return operators, transposed_operators, inv_operators
 
     def sample_rest(self, model):
         args, config = self.args, self.config
@@ -584,7 +586,7 @@ class Diffusion(object):
         self.scale = scale
         print(args.start_operators, args.gradient_operators)
         self.start_degradations, _ = self._get_degradations_list(args.start_operators)
-        self.gradient_degradations, inverse_operators = self._get_degradations_list(args.gradient_operators)
+        self.gradient_degradations, _, inverse_operators = self._get_degradations_list(args.gradient_operators)
 
         #feature_extractor = VGG()
         #feature_extractor.load_state_dict(torch.load(args.ref_feats_path, map_location='cpu'))
@@ -821,8 +823,8 @@ class Diffusion(object):
         scale = round(args.deg_scale)
         self.scale = scale
         print(args.start_operators, args.gradient_operators)
-        self.start_degradations, _ = self._get_degradations_list(args.start_operators)
-        self.gradient_degradations, inverse_operators = self._get_degradations_list(args.gradient_operators)
+        self.start_degradations, _, _ = self._get_degradations_list(args.start_operators)
+        self.gradient_degradations, transposed_operators, inverse_operators = self._get_degradations_list(args.gradient_operators)
 
         self.correction = args.correction_type
         lr = 0.001
@@ -852,7 +854,7 @@ class Diffusion(object):
             sample_fn = partial(sampler.p_sample_loop, model=model)
         
         def Acg(x):
-            return inverse_operators[0](self.gradient_degradations[0](x))
+            return transposed_operators[0](self.gradient_degradations[0](x))
         
         Acg_fn = Acg
         
@@ -870,10 +872,10 @@ class Diffusion(object):
                 y = operator(y)
 
             print(y.shape)
-            # c, h, w = y.shape[1:]
-            # y_up = y.view(1, c*h*w)
-            # for operator in inverse_operators:
-            #     y_up = operator.A_pinv(y_up)
+            c, h, w = y.shape[1:]
+            y_up = y.view(1, c*h*w)
+            for operator in inverse_operators:
+                y_up = operator(y_up)
             # y_up = y_up.view(1, C, H, W)
             # print(y_up.shape)
 
@@ -893,21 +895,27 @@ class Diffusion(object):
                     inverse_data_transform(config, x_orig[i]),
                     os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
                 )
-                # tvu.save_image(
-                #     inverse_data_transform(config, y_up[i]),
-                #     os.path.join(self.args.image_folder, f"Apy/Ainvy_{idx_so_far + i}.png")
-                # )
+                tvu.save_image(
+                    inverse_data_transform(config, y_up[i]),
+                    os.path.join(self.args.image_folder, f"Apy/Ainvy_{idx_so_far + i}.png")
+                )
                 
             # init x_T
-            x = torch.randn(
-                50,
-                config.data.channels,
-                config.data.image_size,
-                config.data.image_size,
-                device=self.device,
-            )
-            choice = np.random.randint(0, 10)
-            x = x[choice:choice + 1]
+            if args.from_noise:
+              x = torch.randn(
+                  50,
+                  config.data.channels,
+                  config.data.image_size,
+                  config.data.image_size,
+                  device=self.device,
+              )
+              choice = np.random.randint(0, 10)
+              x = x[choice:choice + 1]
+            else:
+              print('here')
+              t = (torch.ones(1) * (config.diffusion.num_diffusion_timesteps - 1))
+              at = compute_alpha(self.betas.to('cpu'), t.long()).to(self.device)
+              x = at.sqrt()*y_up + (1 - at)*torch.randn_like(y_up).to(self.device)
 
             skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
             n = x.size(0)
@@ -946,7 +954,7 @@ class Diffusion(object):
                     c2 = (1 - at_next).sqrt() * ((1 - 0.85 ** 2) ** 0.5)
 
                     if args.x0_grad:
-                        x0_t = CG(Acg_fn, inverse_operators[0](y), x0_t, n_inner = 5)
+                        x0_t = CG(Acg_fn, transposed_operators[0](y), x0_t, n_inner = 5)
                         if args.sampler_path and i < 1000 and i >= 800 and i % 100 == 0:
                             x_start = torch.randn(x0_t.shape, device=self.device)
                             with torch.no_grad():
