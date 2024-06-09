@@ -264,24 +264,42 @@ class Diffusion(object):
         inv_operators = []
         for operator in operators_list:
             if operator == 'bicubic':
-                A = lambda z: imresize(z, scale=1/self.scale)
-                factor = int(self.scale)
-                from functions.svd_operators import SRConv
-                def bicubic_kernel(x, a=-0.5):
-                    if abs(x) <= 1:
-                        return (a + 2) * abs(x) ** 3 - (a + 3) * abs(x) ** 2 + 1
-                    elif 1 < abs(x) and abs(x) < 2:
-                        return a * abs(x) ** 3 - 5 * a * abs(x) ** 2 + 8 * a * abs(x) - 4 * a
-                    else:
-                        return 0
-                k = np.zeros((factor * 4))
-                for i in range(factor * 4):
-                    x = (1 / factor) * (i - np.floor(factor * 4 / 2) + 0.5)
-                    k[i] = bicubic_kernel(x)
-                k = k / np.sum(k)
-                kernel = torch.from_numpy(k).float().to(self.device)
-                A_inv = SRConv(kernel / kernel.sum(), \
-                                self.config.data.channels, self.config.data.image_size, self.device, stride=factor)
+              factor = int(self.scale)
+              from functions.svd_operators import SRConv
+              def bicubic_kernel(x, a=-0.5):
+                  if abs(x) <= 1:
+                      return (a + 2) * abs(x) ** 3 - (a + 3) * abs(x) ** 2 + 1
+                  elif 1 < abs(x) and abs(x) < 2:
+                      return a * abs(x) ** 3 - 5 * a * abs(x) ** 2 + 8 * a * abs(x) - 4 * a
+                  else:
+                      return 0
+              k = np.zeros((factor * 4))
+              for i in range(factor * 4):
+                  x = (1 / factor) * (i - np.floor(factor * 4 / 2) + 0.5)
+                  k[i] = bicubic_kernel(x)
+              k = k / np.sum(k)
+              kernel = torch.from_numpy(k).float().to(self.device)
+              A_funcs = SRConv(kernel / kernel.sum(), \
+                              self.config.data.channels, self.config.data.image_size, self.device, stride=factor)
+            # if operator == 'bicubic':
+            #     A = lambda z: imresize(z, scale=1/self.scale)
+            #     factor = int(self.scale)
+            #     from functions.svd_operators import SRConv
+            #     def bicubic_kernel(x, a=-0.5):
+            #         if abs(x) <= 1:
+            #             return (a + 2) * abs(x) ** 3 - (a + 3) * abs(x) ** 2 + 1
+            #         elif 1 < abs(x) and abs(x) < 2:
+            #             return a * abs(x) ** 3 - 5 * a * abs(x) ** 2 + 8 * a * abs(x) - 4 * a
+            #         else:
+            #             return 0
+            #     k = np.zeros((factor * 4))
+            #     for i in range(factor * 4):
+            #         x = (1 / factor) * (i - np.floor(factor * 4 / 2) + 0.5)
+            #         k[i] = bicubic_kernel(x)
+            #     k = k / np.sum(k)
+            #     kernel = torch.from_numpy(k).float().to(self.device)
+            #     A_inv = SRConv(kernel / kernel.sum(), \
+            #                     self.config.data.channels, self.config.data.image_size, self.device, stride=factor)
             elif operator == 'nearest':
                 A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest').clamp_(-1.0, 1.0)
             elif operator == 'linear':
@@ -296,8 +314,8 @@ class Diffusion(object):
                 A = lambda z: torch.nn.functional.interpolate(z, scale_factor=1/self.scale, mode='nearest-exact').clamp_(-1.0, 1.0)
             else:
                 raise ValueError(f'Operator {operator} have not been implemented yet')
-            operators.append(A)
-            inv_operators.append(A_inv)
+            operators.append(A_funcs.A)
+            inv_operators.append(A_funcs.At)
         return operators, inv_operators
 
     def sample_rest(self, model):
@@ -834,10 +852,8 @@ class Diffusion(object):
             sample_fn = partial(sampler.p_sample_loop, model=model)
         
         def Acg(x):
-            x_hat = self.gradient_degradations[0](x)
-            A = lambda z: imresize(z, scale=self.scale)
-            x_hat = A(x_hat)
-            return x_hat
+            return inverse_operators[0](self.gradient_degradations[0](x))
+        
         Acg_fn = Acg
         
         for d in test_dataset:
@@ -852,12 +868,14 @@ class Diffusion(object):
             y = x_orig
             for operator in self.start_degradations:
                 y = operator(y)
-            c, h, w = y.shape[1:]
-            y_up = y.view(1, c*h*w)
-            for operator in inverse_operators:
-                y_up = operator.A_pinv(y_up)
-            y_up = y_up.view(1, C, H, W)
-            print(y_up.shape)
+
+            print(y.shape)
+            # c, h, w = y.shape[1:]
+            # y_up = y.view(1, c*h*w)
+            # for operator in inverse_operators:
+            #     y_up = operator.A_pinv(y_up)
+            # y_up = y_up.view(1, C, H, W)
+            # print(y_up.shape)
 
             if args.clip_guided:
                 ref_clip = clipm.encode_image(transform(d['Ref']))
@@ -875,10 +893,10 @@ class Diffusion(object):
                     inverse_data_transform(config, x_orig[i]),
                     os.path.join(self.args.image_folder, f"Apy/orig_{idx_so_far + i}.png")
                 )
-                tvu.save_image(
-                    inverse_data_transform(config, y_up[i]),
-                    os.path.join(self.args.image_folder, f"Apy/Ainvy_{idx_so_far + i}.png")
-                )
+                # tvu.save_image(
+                #     inverse_data_transform(config, y_up[i]),
+                #     os.path.join(self.args.image_folder, f"Apy/Ainvy_{idx_so_far + i}.png")
+                # )
                 
             # init x_T
             x = torch.randn(
@@ -928,7 +946,7 @@ class Diffusion(object):
                     c2 = (1 - at_next).sqrt() * ((1 - 0.85 ** 2) ** 0.5)
 
                     if args.x0_grad:
-                        x0_t = CG(Acg_fn, y_up, x0_t, n_inner = 5)
+                        x0_t = CG(Acg_fn, inverse_operators[0](y), x0_t, n_inner = 5)
                         if args.sampler_path and i < 1000 and i >= 800 and i % 100 == 0:
                             x_start = torch.randn(x0_t.shape, device=self.device)
                             with torch.no_grad():

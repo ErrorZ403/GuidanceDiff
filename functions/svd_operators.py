@@ -48,14 +48,22 @@ class A_functions:
         Adds trailing zeros to turn a vector from the small dimension (U) to the big dimension (V)
         """
         raise NotImplementedError()
-    
+
+    def _reshape(self, x):
+        b, hwc = x.shape
+        hw = hwc / 3
+        h = w = int(hw ** 0.5)
+        x = x.reshape((b, 3, h, w))
+
+        return x
+
     def A(self, vec):
         """
         Multiplies the input vector by A
         """
         temp = self.Vt(vec)
         singulars = self.singulars()
-        return self.U(singulars * temp[:, :singulars.shape[0]])
+        return self._reshape(self.U(singulars * temp[:, :singulars.shape[0]]))
     
     def At(self, vec):
         """
@@ -63,7 +71,7 @@ class A_functions:
         """
         temp = self.Ut(vec)
         singulars = self.singulars()
-        return self.V(self.add_zeros(singulars * temp[:, :singulars.shape[0]]))
+        return self._reshape(self.V(self.add_zeros(singulars * temp[:, :singulars.shape[0]])))
     
     def A_pinv(self, vec):
         """
