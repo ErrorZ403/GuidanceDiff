@@ -134,7 +134,7 @@ def parse_args_and_config():
         default=None
     )    
     parser.add_argument(
-        '--from_noise',
+        '--grad_sampling',
         action='store_true'
     )
 

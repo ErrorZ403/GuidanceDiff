@@ -901,21 +901,15 @@ class Diffusion(object):
                 )
                 
             # init x_T
-            if args.from_noise:
-              x = torch.randn(
-                  50,
-                  config.data.channels,
-                  config.data.image_size,
-                  config.data.image_size,
-                  device=self.device,
-              )
-              choice = np.random.randint(0, 10)
-              x = x[choice:choice + 1]
-            else:
-              print('here')
-              t = (torch.ones(1) * (config.diffusion.num_diffusion_timesteps - 1))
-              at = compute_alpha(self.betas.to('cpu'), t.long()).to(self.device)
-              x = at.sqrt()*y_up + (1 - at)*torch.randn_like(y_up).to(self.device)
+            x = torch.randn(
+                50,
+                config.data.channels,
+                config.data.image_size,
+                config.data.image_size,
+                device=self.device,
+            )
+            choice = np.random.randint(0, 10)
+            x = x[choice:choice + 1]
 
             skip = config.diffusion.num_diffusion_timesteps//config.time_travel.T_sampling
             n = x.size(0)
@@ -933,7 +927,6 @@ class Diffusion(object):
             for i, j in tqdm.tqdm(time_pairs):
                 i, j = i*skip, j*skip
                 if j<0: j=-1 
-
                 if j < i: # normal sampling 
                     t = (torch.ones(n) * i).to(x.device)
                     next_t = (torch.ones(n) * j).to(x.device)
@@ -952,22 +945,18 @@ class Diffusion(object):
                     
                     c1 = (1 - at_next).sqrt() * 0.85
                     c2 = (1 - at_next).sqrt() * ((1 - 0.85 ** 2) ** 0.5)
-
-                    if args.x0_grad:
-                        x0_t = CG(Acg_fn, transposed_operators[0](y), x0_t, n_inner = 5)
-                        if args.sampler_path and i < 1000 and i >= 800 and i % 100 == 0:
-                            x_start = torch.randn(x0_t.shape, device=self.device)
-                            with torch.no_grad():
-                                x0_t_fused = sample_fn(
-                                    x_start=x_start, record=False, I = y_up, V = x0_t, save_root = None, img_index = None, lamb = 0.5, rho = 0.001
-                                )
-                                x0_fused.append(x0_t_fused[0].detach())
-                                x0_t = x0_t_fused
-                        if j != 0:
-                            xt_next = at_next.sqrt() * x0_t + c1 * torch.randn_like(x0_t) + c2 * et
-                        else:
-                            xt_next = x0_t
-
+                    if args.grad_sampling and i > 200:
+                      gradient = take_grad_texture(self.gradient_degradations, xt, x0_t, y)
+                      x0_t = x0_t - rate * gradient
+                    else:
+                      x0_t = CG(Acg_fn, transposed_operators[0](y), x0_t, n_inner = 5)
+                      y_hat = x0_t.clone()
+                    
+                    if j != 0:
+                        xt_next = at_next.sqrt() * x0_t + c1 * torch.randn_like(x0_t) + c2 * et
+                    else:
+                        xt_next = x0_t
+                    
                     xt_next.detach_()
                     x0_t = x0_t.detach_()
                     xt = xt.detach()
@@ -978,7 +967,6 @@ class Diffusion(object):
 
                     if i % 100 == 0:
                         x0_vision.append(x0_t[0])
-
                 else: # time-travel back
                     next_t = (torch.ones(n) * j).to(x.device)
                     at_next = compute_alpha(self.betas, next_t.long())

@@ -29,6 +29,23 @@ def take_grad_ref(operators, x, x_hat, measurement, features=None):
 
     return gradient
 
+def take_grad_texture(operators, x, x_hat, y):
+    x_hat_deg = x_hat
+    for operator in operators:
+        x_hat_deg = operator(x_hat_deg)
+    
+    difference_pixel = x_hat_deg - y
+    loss_value_pixel = torch.linalg.norm(difference_pixel)
+    #x_freq, y_freq = self.get_high_pass(x_hat, measurement)
+
+    #difference_pixel_2 = x_hat - y_hat
+    #loss_value_pixel_2 = torch.linalg.norm(difference_pixel_2)
+
+    loss_value = loss_value_pixel #+ 0.2*loss_value_pixel_2
+
+    gradient = torch.autograd.grad(outputs=loss_value, inputs=x)[0]
+
+    return gradient
 def take_grad_feedbackSR(operators, inverse_operators, x, x_hat, y):
     for operator in operators:
         x_hat_lq = operator(x_hat)
